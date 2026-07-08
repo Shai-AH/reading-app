@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Reading App — Face Mesh Test</title>
+  <style>
+    #container { position: relative; width: 640px; height: 480px; }
+    #webcam, #overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 640px;
+      height: 480px;
+    }
+    #readingText {
+      max-width: 640px;
+      margin-top: 10px;
+      font-size: 20px;
+      line-height: 1.6;
+    }
+    #readingText .word {
+      cursor: pointer;
+      border-radius: 3px;
+    }
+    #readingText .word:hover {
+      background-color: #eeeeee;
+    }
+    #readingText .word.active {
+      background-color: #ffe066;
+    }
+  </style>
+</head>
+<body>
+  <h1>Face Mesh Test</h1>
+  <p>You should see dots tracking your face, especially around your mouth.</p>
+  <p id="privacyNote" style="font-size: 13px; color: #555; max-width: 640px;">
+    🔒 Your camera video is processed entirely on your device and is never uploaded,
+    recorded, or sent anywhere. You can verify this yourself in your browser's
+    DevTools → Network tab.
+  </p>
+
+  <div id="container">
+    <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <div id="controls" style="margin-top: 10px;">
+    <button id="startBtn">Start Reading</button>
+  </div>
+
+  <div id="readingText"></div>
+
+  <div id="debug" style="margin-top: 10px; font-family: monospace; font-size: 16px;">
+    <div>MAR: <span id="marValue">-</span></div>
+    <div>Mouth state: <span id="mouthState">-</span></div>
+    <div>Speech state: <span id="speechState">-</span></div>
+    <div>Yaw: <span id="yawValue">-</span>&deg;</div>
+    <div>Pitch: <span id="pitchValue">-</span>&deg;</div>
+    <div>Head pose: <span id="facingState">facing screen</span></div>
+  </div>
+
+  <script type="module" src="main.js"></script>
+
+</body>
+</html>
