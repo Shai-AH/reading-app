@@ -219,10 +219,7 @@ function speakFrom(offset) {
     console.log('[TIMING] speak() -> onstart gap:', (performance.now() - speakCallTime).toFixed(0), 'ms');
   };
   console.log('[TIMING] speak() called, speechSynthesis.speaking =', speechSynthesis.speaking, 'pending =', speechSynthesis.pending);
-  // TEMP DIAGNOSTIC: check if default voice is local (instant) or network-dependent (adds latency)
-  const voices = speechSynthesis.getVoices();
-  console.log('[TIMING] voices:', voices.map(v => `${v.name} | localService=${v.localService} | default=${v.default}`));
-  // --- END TEMP DIAGNOSTIC ---
+  console.log('[TIMING] crossOriginIsolated =', self.crossOriginIsolated); // TEMP DIAGNOSTIC
 
   currentUtterance.onboundary = (event) => {
     if (event.name !== 'word') return;
