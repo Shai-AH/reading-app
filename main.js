@@ -86,7 +86,6 @@ function buildWordSpans(text) {
 // so a click is really just "manually set the resume point, then behave as if
 // mouth-open logic ran."
 function onWordClick(wordIndex) {
-  console.log('[TIMING] word clicked at', performance.now().toFixed(0)); // TEMP DIAGNOSTIC
   if (wordSpans.length === 0) return; // clicked before any reading session started
   const word = wordSpans[wordIndex];
 
@@ -212,14 +211,6 @@ function speakFrom(offset) {
   lastBoundaryOffset = 0;
 
   currentUtterance = new SpeechSynthesisUtterance(READING_TEXT.slice(offset));
-
-  // --- TEMP DIAGNOSTIC (Phase 5 lag investigation, remove once resolved) ---
-  const speakCallTime = performance.now();
-  currentUtterance.onstart = () => {
-    console.log('[TIMING] speak() -> onstart gap:', (performance.now() - speakCallTime).toFixed(0), 'ms');
-  };
-  console.log('[TIMING] speak() called, speechSynthesis.speaking =', speechSynthesis.speaking, 'pending =', speechSynthesis.pending);
-  console.log('[TIMING] crossOriginIsolated =', self.crossOriginIsolated); // TEMP DIAGNOSTIC
 
   currentUtterance.onboundary = (event) => {
     if (event.name !== 'word') return;
