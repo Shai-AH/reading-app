@@ -46,6 +46,16 @@
 
   <div id="controls" style="margin-top: 10px;">
     <button id="startBtn">Start Reading</button>
+    <button id="calibrateBtn">Calibrate</button>
+  </div>
+
+  <div id="calibrationPanel" style="display:none; margin-top: 10px; padding: 12px; border: 1px solid #ccc; max-width: 640px; background: #fafafa;">
+    <div id="calibrationStep" style="font-weight: bold;"></div>
+    <div id="calibrationInstruction" style="margin-top: 6px;"></div>
+    <div id="calibrationCountdown" style="margin-top: 6px; font-family: monospace;"></div>
+    <div id="calibrationMessage" style="margin-top: 6px; color: #b00020;"></div>
+    <button id="calibrationCancelBtn" style="margin-top: 8px;">Cancel</button>
+    <button id="calibrationRetryBtn" style="margin-top: 8px; display:none;">Retry</button>
   </div>
 
   <div id="readingText"></div>
@@ -59,6 +69,7 @@
     <div>Head pose: <span id="facingState">facing screen</span></div>
     <div>Movement range: <span id="movementRangeValue">-</span></div>
     <div>Cadence (elapsed/expected): <span id="cadenceValue">-</span></div>
+    <div>Calibration: <span id="calibrationStatusValue">using default thresholds</span></div>
   </div>
 
   <script type="module" src="main.js"></script>

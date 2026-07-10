@@ -20,8 +20,14 @@ const RIGHT_CORNER = 291;
 //   closed range          ≈ 0.022 - 0.037
 //   mutter range (target) ≈ 0.060 - 0.200
 //   wide open / yawn      ≈ 0.800 - 1.180
-const OPEN_THRESHOLD = 0.05;   // MAR must rise above this to count as "open"
-const CLOSE_THRESHOLD = 0.04;  // MAR must fall below this to count as "closed"
+// Phase 7b: these were consts until now. Calibration mode can override them
+// per-device via applyCalibration(); DEFAULT_* below are the fallback values
+// (student's original hand-tuned numbers) used whenever no saved calibration
+// exists yet, so an uncalibrated first run behaves exactly as before.
+const DEFAULT_OPEN_THRESHOLD = 0.05;
+const DEFAULT_CLOSE_THRESHOLD = 0.04;
+let OPEN_THRESHOLD = DEFAULT_OPEN_THRESHOLD;   // MAR must rise above this to count as "open"
+let CLOSE_THRESHOLD = DEFAULT_CLOSE_THRESHOLD; // MAR must fall below this to count as "closed"
 
 let mouthState = 'closed'; // 'open' | 'closed'
 
@@ -149,18 +155,298 @@ const speechStateEl = document.getElementById('speechState');
 const startBtn = document.getElementById('startBtn');
 const readingTextEl = document.getElementById('readingText');
 
-// --- Phase 3: head-pose (yaw/pitch) gating ---
-// PLACEHOLDER thresholds (degrees) — not yet calibrated against a real face/camera,
-// unlike the MAR thresholds. Watch the debug readout while deliberately turning your
-// head and adjust these two numbers the same way OPEN/CLOSE_THRESHOLD were tuned.
-const YAW_THRESHOLD = 25;
-const PITCH_THRESHOLD = 20;
+// --- Phase 3/7: head-pose (yaw/pitch) gating ---
+// Live-calibrated (Phase 7, Entry 11) against student's real face/camera, same
+// process as the MAR thresholds: watched the live debug readout while
+// deliberately turning/tilting the head to find the "facing" -> "looking away"
+// boundary, rather than guessing.
+//   Normal reading wobble: yaw -1.1 to -0.8, pitch +3.8 to +5.5 (pitch isn't
+//     centered on 0 — natural head angle while reading looks slightly down).
+//   Measured yaw boundary: 25.8-26.4, symmetric left/right.
+//   Measured pitch boundary: -20.8 to -21.7, symmetric up/down.
+// Thresholds set just above each measured boundary, same margin approach used
+// for STOPPED_RANGE_THRESHOLD.
+const DEFAULT_YAW_THRESHOLD = 26;
+const DEFAULT_PITCH_THRESHOLD = 21;
+let YAW_THRESHOLD = DEFAULT_YAW_THRESHOLD;
+let PITCH_THRESHOLD = DEFAULT_PITCH_THRESHOLD;
 
 let isFacingScreen = true;
 
 const yawValueEl = document.getElementById('yawValue');
 const pitchValueEl = document.getElementById('pitchValue');
 const facingStateEl = document.getElementById('facingState');
+
+// --- Phase 7b: guided in-app calibration mode ---
+// Reproduces, without Claude/chat in the loop, the same process used by hand
+// for every threshold in this file so far: watch a live number while doing a
+// specific action, then derive a threshold from it. Scoped to MAR (open/
+// close) and head-pose (yaw/pitch) only — STOPPED_RANGE_THRESHOLD and the
+// cadence constants were tuned from live *reading* behavior over several
+// sessions (Entries 9-10), not a single static pose, so they're out of scope
+// here and stay as fixed constants for now.
+const CALIBRATION_STORAGE_KEY = 'readingAppCalibration';
+
+// Minimum required MAR gap between the neutral and mouthing-speech steps,
+// and a minimum degrees-turned floor for head-pose thresholds. Both exist to
+// reject a bad calibration run (e.g. user didn't actually mouth words, or
+// didn't turn their head) rather than silently saving broken thresholds.
+// MIN_MAR_GAP set well below the real neutral-vs-mutter gap this project has
+// actually measured (~0.023, see Phase 6a calibration notes) so a genuine
+// attempt always clears it. MIN_POSE_THRESHOLD set well above the normal
+// reading wobble measured in Phase 7a (yaw ~1°, pitch ~4-5°).
+const MIN_MAR_GAP = 0.015;
+const MIN_POSE_THRESHOLD = 8; // degrees; also acts as a floor on the derived threshold
+
+const CALIBRATION_STEPS = [
+  {
+    id: 'neutral',
+    label: 'Step 1 of 4 — Neutral face',
+    instruction: 'Relax your mouth naturally, like you\'re not reading. Hold still.',
+    prepMs: 1000,
+    sampleMs: 3000,
+    metric: 'mar'
+  },
+  {
+    id: 'mutter',
+    label: 'Step 2 of 4 — Silent mouthing',
+    instruction: 'Silently mouth this sentence as if reading aloud, no need to make sound: ' +
+      '"The quick brown fox jumps over the lazy dog."',
+    prepMs: 1000,
+    sampleMs: 4000,
+    metric: 'mar'
+  },
+  {
+    id: 'facing',
+    label: 'Step 3 of 4 — Facing screen',
+    instruction: 'Look directly at the camera, like you\'re reading normally. Hold still.',
+    prepMs: 1000,
+    sampleMs: 3000,
+    metric: 'pose'
+  },
+  {
+    id: 'away',
+    label: 'Step 4 of 4 — Turned away',
+    instruction: 'Turn your head to where you\'d expect reading to pause, and hold it there.',
+    prepMs: 1000,
+    sampleMs: 3000,
+    metric: 'pose'
+  }
+];
+
+let calibration = {
+  active: false,
+  stepIndex: -1,
+  phase: null,          // 'prep' | 'sampling'
+  phaseStartTime: 0,
+  currentSamples: [],   // samples for the step currently being collected
+  results: {}           // stepId -> array of samples, filled in as steps complete
+};
+
+const calibrateBtn = document.getElementById('calibrateBtn');
+const calibrationPanel = document.getElementById('calibrationPanel');
+const calibrationStepEl = document.getElementById('calibrationStep');
+const calibrationInstructionEl = document.getElementById('calibrationInstruction');
+const calibrationCountdownEl = document.getElementById('calibrationCountdown');
+const calibrationMessageEl = document.getElementById('calibrationMessage');
+const calibrationCancelBtn = document.getElementById('calibrationCancelBtn');
+const calibrationRetryBtn = document.getElementById('calibrationRetryBtn');
+const calibrationStatusValueEl = document.getElementById('calibrationStatusValue');
+
+function average(arr) {
+  if (arr.length === 0) return 0;
+  return arr.reduce((sum, v) => sum + v, 0) / arr.length;
+}
+
+function startCalibration() {
+  // Stop any active reading first — calibration and reading shouldn't run
+  // at the same time, and this reuses the same safe-reset pattern as the
+  // Start Reading button (cancel() is safe even if nothing is speaking).
+  manualCancel = true;
+  speechSynthesis.cancel();
+  isSpeakingChunk = false;
+  readingActive = false;
+  speechStateEl.textContent = 'idle (calibrating)';
+
+  calibration = {
+    active: true,
+    stepIndex: 0,
+    phase: 'prep',
+    phaseStartTime: performance.now(),
+    currentSamples: [],
+    results: {}
+  };
+
+  startBtn.disabled = true;
+  calibrateBtn.disabled = true;
+  calibrationRetryBtn.style.display = 'none';
+  calibrationMessageEl.textContent = '';
+  calibrationPanel.style.display = 'block';
+  renderCalibrationStep();
+}
+
+function cancelCalibration() {
+  calibration.active = false;
+  calibrationPanel.style.display = 'none';
+  startBtn.disabled = false;
+  calibrateBtn.disabled = false;
+}
+
+function renderCalibrationStep() {
+  const step = CALIBRATION_STEPS[calibration.stepIndex];
+  calibrationStepEl.textContent = step.label;
+  calibrationInstructionEl.textContent = step.instruction;
+}
+
+// Called once per frame from predictLoop while calibration is active. Handles
+// both the prep countdown (gives the user a moment to get into position
+// before we start trusting samples) and the actual sampling window.
+function updateCalibration(mar, yaw, pitch) {
+  const step = CALIBRATION_STEPS[calibration.stepIndex];
+  const now = performance.now();
+  const elapsed = now - calibration.phaseStartTime;
+
+  if (calibration.phase === 'prep') {
+    const remaining = Math.max(0, step.prepMs - elapsed);
+    calibrationCountdownEl.textContent = `Get ready... ${Math.ceil(remaining / 1000)}`;
+    if (elapsed >= step.prepMs) {
+      calibration.phase = 'sampling';
+      calibration.phaseStartTime = now;
+      calibration.currentSamples = [];
+    }
+    return;
+  }
+
+  // phase === 'sampling'
+  calibration.currentSamples.push({ mar, yaw, pitch });
+  const remaining = Math.max(0, step.sampleMs - elapsed);
+  calibrationCountdownEl.textContent = `Hold it... ${Math.ceil(remaining / 1000)}`;
+
+  if (elapsed >= step.sampleMs) {
+    calibration.results[step.id] = calibration.currentSamples;
+    calibration.stepIndex += 1;
+
+    if (calibration.stepIndex >= CALIBRATION_STEPS.length) {
+      finishCalibration();
+    } else {
+      calibration.phase = 'prep';
+      calibration.phaseStartTime = now;
+      calibration.currentSamples = [];
+      renderCalibrationStep();
+    }
+  }
+}
+
+function finishCalibration() {
+  const neutralMar = average(calibration.results.neutral.map(s => s.mar));
+  const mutterMar = average(calibration.results.mutter.map(s => s.mar));
+  const awayYaw = average(calibration.results.away.map(s => Math.abs(s.yaw)));
+  const awayPitch = average(calibration.results.away.map(s => Math.abs(s.pitch)));
+  const facingYaw = average(calibration.results.facing.map(s => Math.abs(s.yaw)));
+  const facingPitch = average(calibration.results.facing.map(s => Math.abs(s.pitch)));
+
+  // Reject a run that couldn't have produced meaningful thresholds, rather
+  // than silently saving broken values. Two failure modes: mouth didn't
+  // move enough between neutral/mutter, or head didn't turn enough between
+  // facing/away.
+  const marGap = mutterMar - neutralMar;
+  const poseTurn = Math.max(awayYaw - facingYaw, awayPitch - facingPitch);
+
+  if (marGap < MIN_MAR_GAP) {
+    showCalibrationFailure(
+      'Not enough difference between the neutral and mouthing steps. ' +
+      'Try exaggerating the silent mouthing a bit more, then retry.'
+    );
+    return;
+  }
+  if (poseTurn < MIN_POSE_THRESHOLD / 2) {
+    showCalibrationFailure(
+      'Not enough head movement between the facing and turned-away steps. ' +
+      'Try turning further away, then retry.'
+    );
+    return;
+  }
+
+  // Same margin logic used by hand for the original OPEN/CLOSE thresholds:
+  // sit closeThreshold and openThreshold inside the neutral-to-mutter gap,
+  // in that order, so the existing hysteresis check (open above, close
+  // below) keeps working unchanged.
+  const closeThreshold = neutralMar + marGap * 0.33;
+  const openThreshold = neutralMar + marGap * 0.67;
+
+  // Derived directly from the measured turn-away boundary, floored so a
+  // shallow turn (e.g. user only turned yaw, not pitch) can't produce an
+  // oversensitive threshold that trips on normal reading wobble.
+  const yawThreshold = Math.max(MIN_POSE_THRESHOLD, awayYaw);
+  const pitchThreshold = Math.max(MIN_POSE_THRESHOLD, awayPitch);
+
+  const data = {
+    openThreshold,
+    closeThreshold,
+    yawThreshold,
+    pitchThreshold,
+    calibratedAt: new Date().toISOString()
+  };
+
+  try {
+    localStorage.setItem(CALIBRATION_STORAGE_KEY, JSON.stringify(data));
+  } catch (err) {
+    console.error('Could not save calibration:', err);
+  }
+
+  applyCalibration(data);
+
+  calibrationStepEl.textContent = 'Calibration complete';
+  calibrationInstructionEl.textContent = 'Your thresholds have been saved for this device.';
+  calibrationCountdownEl.textContent = '';
+  calibration.active = false;
+  startBtn.disabled = false;
+  calibrateBtn.disabled = false;
+  setTimeout(() => { calibrationPanel.style.display = 'none'; }, 2000);
+}
+
+function showCalibrationFailure(message) {
+  calibration.active = false;
+  calibrationMessageEl.textContent = message;
+  calibrationRetryBtn.style.display = 'inline-block';
+  startBtn.disabled = false;
+  calibrateBtn.disabled = false;
+}
+
+// Applies a calibration result (either freshly computed or loaded from
+// localStorage) to the live thresholds used everywhere else in the file.
+function applyCalibration(data) {
+  OPEN_THRESHOLD = data.openThreshold;
+  CLOSE_THRESHOLD = data.closeThreshold;
+  YAW_THRESHOLD = data.yawThreshold;
+  PITCH_THRESHOLD = data.pitchThreshold;
+
+  const when = new Date(data.calibratedAt).toLocaleString();
+  calibrationStatusValueEl.textContent = `custom (calibrated ${when})`;
+}
+
+// Runs once at startup, before the webcam loop begins producing frames.
+function loadSavedCalibration() {
+  let raw;
+  try {
+    raw = localStorage.getItem(CALIBRATION_STORAGE_KEY);
+  } catch (err) {
+    console.error('Could not read saved calibration:', err);
+    return;
+  }
+  if (!raw) return;
+
+  try {
+    const data = JSON.parse(raw);
+    applyCalibration(data);
+  } catch (err) {
+    console.error('Saved calibration was corrupted, ignoring:', err);
+  }
+}
+
+calibrateBtn.addEventListener('click', startCalibration);
+calibrationCancelBtn.addEventListener('click', cancelCalibration);
+calibrationRetryBtn.addEventListener('click', startCalibration);
 
 function buildWordSpans(text) {
   readingTextEl.innerHTML = '';
@@ -251,9 +537,19 @@ function updateHeadPose(matrixData) {
 
   isFacingScreen = facing;
   facingStateEl.textContent = isFacingScreen ? 'facing screen' : 'looking away';
-  // No pause()/resume() here anymore — gating is enforced entirely in onMouthOpen
-  // by simply refusing to start the next word while facing away. Whatever word
-  // is already mid-utterance just finishes naturally.
+  // Bug fix (Phase 7, Entry 11): speech is one continuous utterance (Phase 3),
+  // not per-word — it never "finishes naturally" at a word boundary. Looking
+  // away mid-utterance must actively stop it via the same cancel() path as a
+  // mouth-close, or it just keeps talking regardless of head pose. mouthState
+  // itself is left untouched here since the mouth may still be physically open.
+  if (!isFacingScreen) {
+    onMouthClosed();
+  } else if (mouthState === 'open') {
+    // Mirrors Phase 4's click-to-word pattern: if the mouth is already open
+    // when we come back to facing the screen, resume immediately rather than
+    // waiting for a fresh mouth-open edge that may never come.
+    onMouthOpen();
+  }
 }
 
 function getMAR(landmarks) {
@@ -431,6 +727,7 @@ async function setup() {
     outputFacialTransformationMatrixes: true
   });
 
+  loadSavedCalibration();
   startWebcam();
 }
 
@@ -474,12 +771,32 @@ function predictLoop() {
     // Use the first (only) detected face for mouth-state tracking
     const mar = getMAR(results.faceLandmarks[0]);
     marValueEl.textContent = mar.toFixed(3);
-    updateMouthState(mar);
+
+    if (calibration.active) {
+      // During calibration we still want live yaw/pitch for this same frame,
+      // so pull it here rather than waiting for the block below (which is
+      // skipped once calibration owns the frame).
+      let yaw = 0, pitch = 0;
+      if (results.facialTransformationMatrixes && results.facialTransformationMatrixes.length > 0) {
+        const pose = getYawPitch(results.facialTransformationMatrixes[0].data);
+        yaw = pose.yaw;
+        pitch = pose.pitch;
+        yawValueEl.textContent = yaw.toFixed(1);
+        pitchValueEl.textContent = pitch.toFixed(1);
+      }
+      updateCalibration(mar, yaw, pitch);
+    } else {
+      updateMouthState(mar);
+    }
   }
 
   // Phase 3: head-pose gating, independent of whether lip landmarks were found
   // above (facialTransformationMatrixes comes from the same detection pass).
-  if (results.facialTransformationMatrixes && results.facialTransformationMatrixes.length > 0) {
+  // Skipped during calibration — updateCalibration() above already consumed
+  // this frame's pose data, and we don't want head-pose gating firing
+  // onMouthClosed()/onMouthOpen() mid-calibration since there's no active
+  // reading session for it to act on.
+  if (!calibration.active && results.facialTransformationMatrixes && results.facialTransformationMatrixes.length > 0) {
     updateHeadPose(results.facialTransformationMatrixes[0].data);
   }
 
