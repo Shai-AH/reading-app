@@ -89,8 +89,8 @@ const cadenceValueEl = document.getElementById('cadenceValue');
 
 // Rough syllable estimate via vowel-cluster counting: each run of consecutive
 // vowel characters (a, e, i, o, u, y) counts as one syllable candidate, with
-// two refinements found via testing against the real READING_TEXT (not just
-// isolated words):
+// three refinements found via testing against the real READING_TEXT (not
+// just isolated words):
 //   1. Punctuation stripping — word spans include attached punctuation
 //      (buildWordSpans uses \S+), so "sentence," was failing the trailing-'e'
 //      check below simply because it ends in ',' not 'e'. Strip anything
@@ -100,21 +100,43 @@ const cadenceValueEl = document.getElementById('cadenceValue');
 //      are a different pattern: that 'e' is NOT silent, it's part of a real
 //      spoken syllable. Detected via a simple suffix check; skip the
 //      subtraction when it matches.
-// Known remaining gap, deliberately not handled: mid-word silent-e patterns
-// (e.g. "movement" overcounts as 3 instead of 2, since the silent e in
-// "move" isn't at the end of the whole word) — a fundamentally different,
-// harder problem than end-of-word silent-e, and not worth chasing with this
-// heuristic. Revisit only if it turns out to matter in practice.
+//   3. Mid-word silent-e (Phase 7c, was a deferred known gap from Entry 10 —
+//      "movement" overcounted as 3 instead of 2, since the silent 'e' in
+//      "move" isn't at the very end of the whole word so refinement #2's
+//      end-of-word check missed it). Fixed generally rather than as a one-off:
+//      a base "magic e" word (vowel+consonant+e — move, care, hope, late)
+//      keeps its silent 'e' in spelling when a common consonant-initial
+//      suffix is attached (movement, careless, hopeful, lately), even though
+//      it's still silent. Detected via a small suffix list + checking the
+//      stem (word minus suffix) for the same vowel-consonant-e pattern used
+//      above. Verified via direct testing against READING_TEXT plus a set of
+//      common real-word cases (careless, management, wireless, etc.) to
+//      check it generalizes without misfiring on unrelated words (e.g.
+//      "elephant", "quickly", "endless" correctly stay unaffected).
 // Floor of 1 so every real word gets at least one syllable's worth of
-// expected duration, even after the silent-e subtraction.
+// expected duration, even after any silent-e subtraction.
+const SILENT_E_SUFFIXES = ['ment', 'ness', 'less', 'ful', 'ly', 'ship', 'ward', 'some'];
+
 function estimateSyllables(word) {
   const cleaned = word.toLowerCase().replace(/[^a-z]/g, '');
   const matches = cleaned.match(/[aeiouy]+/g);
   let syllables = matches ? matches.length : 0;
+
   const endsInConsonantLe = /[^aeiouy]le$/.test(cleaned);
   if (cleaned.endsWith('e') && !endsInConsonantLe && syllables > 1) {
     syllables -= 1;
   }
+
+  for (const suffix of SILENT_E_SUFFIXES) {
+    if (cleaned.endsWith(suffix) && cleaned.length > suffix.length) {
+      const stem = cleaned.slice(0, -suffix.length);
+      if (/[aeiouy][^aeiouy]e$/.test(stem) && syllables > 1) {
+        syllables -= 1;
+      }
+      break; // only one suffix can match the end of a word
+    }
+  }
+
   return Math.max(1, syllables);
 }
 
@@ -745,6 +767,31 @@ async function startWebcam() {
   }
 }
 
+// --- Phase 7c: dynamic frame rate ---
+// Full-rate tracking is only actually needed while something time-sensitive
+// is happening: an active reading session (mouth/pose gating needs every
+// frame to feel responsive) or an in-progress calibration step (same
+// reason — it's sampling live numbers). Otherwise — webcam on but Start
+// Reading not yet clicked, or after a reading has finished — we throttle
+// down substantially, since nothing is consuming the extra frames anyway.
+// This doesn't change accuracy or responsiveness of the core reading
+// experience at all; it only changes how often we poll while genuinely
+// idle. No new libraries/network calls, so privacy and $0-cost goals are
+// unaffected.
+const IDLE_FRAME_INTERVAL_MS = 100; // ~10fps while idle, vs ~60fps (rAF) while active
+
+function isIdle() {
+  return !readingActive && !calibration.active;
+}
+
+function scheduleNextFrame() {
+  if (isIdle()) {
+    setTimeout(() => requestAnimationFrame(predictLoop), IDLE_FRAME_INTERVAL_MS);
+  } else {
+    requestAnimationFrame(predictLoop);
+  }
+}
+
 function predictLoop() {
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
@@ -800,7 +847,7 @@ function predictLoop() {
     updateHeadPose(results.facialTransformationMatrixes[0].data);
   }
 
-  requestAnimationFrame(predictLoop);
+  scheduleNextFrame();
 }
 
 setup();
