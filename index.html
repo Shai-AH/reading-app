@@ -12,9 +12,36 @@
       width: 640px;
       height: 480px;
     }
-    #readingText {
+    /* Phase 11b: ambient trouble-shading. A persistent border around the
+       reading pane (NOT the per-word highlight, which resets every word)
+       that drifts through red shades as a combined "trouble score" rises —
+       slow to accumulate, fast to recover, so a brief correction doesn't
+       linger as false-red. border-color is driven from JS via updateTroubleShading()
+       (hsla with saturation+opacity both tied to the score, hue fixed) so the
+       signal doesn't rely on hue alone (colorblind accessibility, Entry 17 Q4).
+       transition smooths frame-to-frame JS updates into a genuine drift rather
+       than a flicker. */
+    #readingPane {
       max-width: 640px;
       margin-top: 10px;
+      padding: 10px;
+      border-radius: 6px;
+      border: 4px solid transparent;
+      transition: border-color 200ms ease-out;
+    }
+    /* Separate fast/sharp cue (Entry 17 Q2) for hard failures — a stuck word
+       or a head-pose gate trip — layered on TOP of the slow ambient drift via
+       box-shadow rather than replacing it, so the two channels don't fight or
+       get confused as the same signal. */
+    #readingPane.trouble-pulse {
+      animation: troublePulse 260ms ease-out;
+    }
+    @keyframes troublePulse {
+      0%   { box-shadow: 0 0 0 0 rgba(180, 0, 0, 0); }
+      30%  { box-shadow: 0 0 0 7px rgba(180, 0, 0, 0.4); }
+      100% { box-shadow: 0 0 0 0 rgba(180, 0, 0, 0); }
+    }
+    #readingText {
       font-size: 20px;
       line-height: 1.6;
     }
@@ -47,6 +74,10 @@
   <div id="controls" style="margin-top: 10px;">
     <button id="startBtn">Start Reading</button>
     <button id="calibrateBtn">Calibrate</button>
+    <label style="margin-left: 12px;">
+      <input type="checkbox" id="toneToggle">
+      Emotional tone (experimental)
+    </label>
   </div>
 
   <div id="calibrationPanel" style="display:none; margin-top: 10px; padding: 12px; border: 1px solid #ccc; max-width: 640px; background: #fafafa;">
@@ -58,7 +89,9 @@
     <button id="calibrationRetryBtn" style="margin-top: 8px; display:none;">Retry</button>
   </div>
 
-  <div id="readingText"></div>
+  <div id="readingPane">
+    <div id="readingText"></div>
+  </div>
 
   <div id="debug" style="margin-top: 10px; font-family: monospace; font-size: 16px;">
     <div>MAR: <span id="marValue">-</span></div>
@@ -70,6 +103,9 @@
     <div>Movement range: <span id="movementRangeValue">-</span></div>
     <div>Cadence (elapsed/expected): <span id="cadenceValue">-</span></div>
     <div>Calibration: <span id="calibrationStatusValue">using default thresholds</span></div>
+    <div>Speed calibration: <span id="speedCalibrationValue">using default pacing (calibrate to personalize)</span></div>
+    <div>Tone: <span id="toneValue">off</span></div>
+    <div>Trouble score: <span id="troubleValue">0.00</span></div>
   </div>
 
   <script type="module" src="main.js"></script>
