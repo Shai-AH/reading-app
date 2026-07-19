@@ -1,5 +1,5 @@
 # PROGRESS LOG — "Reading App" (working title)
-Last updated: July 19, 2026 (Entry 20)
+Last updated: July 19, 2026 (Entry 22)
 
 > HOW TO USE: Single source of truth. Claude reads this first in every new chat.
 > Update before ending each session. If Claude contradicts this file, trust this file.
@@ -316,6 +316,17 @@ ceiling, not a design gap; don't try to engineer around it.
   also now surface as trouble-shading/pulse activity, not just a stuck
   reader mouth — untested, but a reasonable expectation given the mechanism.
 
+  **Live-validated on Vercel (Entry 21).** Deployed and tested during normal
+  reading: trouble score rests at 0.12-0.18, confirmed by the student to
+  feel right (calm, not alarming, not flickering). This resting-above-zero
+  baseline is expected, not a bug — pose trouble is a continuous distance
+  measure so ordinary head wobble always registers some small fraction of
+  it, and the slow-accumulate/fast-recover smoothing settles to a resting
+  level rather than snapping to exactly 0. Treated as validated; no further
+  tuning planned unless real use surfaces a specific complaint (too jumpy,
+  too slow to clear, etc.) to tune against. **Phase 11b fully closed out —
+  deployed, live-tested, no open flags.**
+
 - **Phase 11 — Speed calibration step, shipped (Entry 18).** 5th wizard step
   ("Your pace"), `main.js`. Mechanism: peak-trough envelope detection on
   (lightly EMA-smoothed) MAR — NOT absolute open/close crossing like the main
@@ -514,15 +525,10 @@ lower priority than 9-14. Order below is deliberate, agreed with student:
       before trusting `personalizedRate` in production (see Decisions) —
       not blocking Phase 11b.
 - [x] **Phase 11b:** Ambient trouble-shading (color-coded feedback border).
-      Shipped Entry 19 — blended max() score (pose + cadence), separate sharp
-      pulse cue for hard failures, reads off Phase 11's calibrated
-      thresholds, hue paired with opacity/saturation for accessibility. See
-      Decisions. **Cadence-clock bug found and fixed Entry 20** (was pinning
-      the border red during normal smooth reading — see Decisions).
-      **Ready to deploy** — confirm push to Vercel before starting the next phase.
-      **Open flag carried forward:** accumulate/recover rates and cadence/
-      stall constants are still reasoned starting guesses, not yet live-tuned
-      against a real session (now that the underlying clock is correct).
+      Shipped Entry 19, cadence-clock bug fixed Entry 20, deployed to Vercel
+      and live-tested Entry 21 — resting trouble score 0.12-0.18 during
+      normal reading, confirmed feels right to the student. **Fully closed
+      out — no deploy debt, no open flags.** See Decisions.
 - [ ] **Phase 12:** Distance / recalibration robustness.
 - [ ] **Phase 13:** Full security review pass (after Phase 10).
 - [ ] **Phase 14:** Shipping prep + paywall.
@@ -565,24 +571,21 @@ two copies. Landmarks used: 13/14 (lips), 61/291 (mouth corners).
   investigation before trusting `personalizedRate` in production) — doesn't
   block Phase 11b.
 
-- **Phase 11b (ambient trouble-shading): shipped Entry 19, cadence-clock bug
-  fixed Entry 20.** Full mechanics/constants in Section 3. Modifies
-  `index.html` (new `#readingPane` wrapper div + CSS, new debug line) and
-  `main.js` (new scoring/smoothing/pulse functions using a dedicated
-  per-word clock, small hooks into `predictLoop`, `updateHeadPose`,
-  `highlightWordAt`, `speakFrom`, Start Reading click, and `finishReading`).
-  **Not deployed yet — this touches both files, so per the standing deploy
-  reminder (Section 2), push to Vercel before starting the next phase.**
+- **Phase 11b (ambient trouble-shading): fully closed out as of Entry 21.**
+  Shipped Entry 19, cadence-clock bug fixed Entry 20, deployed to Vercel and
+  live-tested Entry 21 (resting score 0.12-0.18, confirmed feels right).
+  Full mechanics/constants in Section 3. No deploy debt, no open flags.
 
-**Next action:** Deploy Phase 11b (including the Entry 20 bugfix) to Vercel,
-then a real live-testing pass on Phase 11b's constants (accumulate/recover
-rates, cadence overrun cap, stall factor) now that the underlying clock is
-correct — same "watch it live before trusting it" pattern used for every
-other threshold in this project, and worth doing now specifically since the
-Entry 20 bug means nothing about the border's behavior during normal reading
-has actually been validated yet. After that: Phase 12 (distance/
-recalibration robustness) or Phase 9 (mobile bug fix) — both still open,
-just deprioritized, not abandoned.
+**Next action: Phase 9 (mobile TTS restart bug fix), next chat.** Decided
+Entry 22 — chosen over Phase 12 (distance/recalibration robustness) because
+it's a regression on something that already works everywhere else (not new
+scope), small/isolated, and a working theory is already narrowed down (see
+3c: `onboundary` events likely unreliable on the affected mobile TTS voice,
+so `lastBoundaryOffset` goes stale). Phase 12 has no urgency — it's a
+robustness improvement, not a fix, so it can wait without cost. Needs live
+device testing to confirm the theory before fixing — start there. Per
+Section 2 working style, start a fresh chat for it; this file carries the
+context across. 8b/8c/10/12/13/14 remain open, unchanged.
 
 ## 6. Log of sessions (archive — one line each, full reasoning lives in Section 3)
 
@@ -605,3 +608,5 @@ just deprioritized, not abandoned.
 - **Entry 18 (Jul 19):** Built Phase 11's Speed calibration step end-to-end — long iterative session, several live-tested reverts (absolute-threshold detection → peak-trough; a feedback-loop-prone adaptive threshold tried and reverted). Landed on: peak-trough MAR envelope detection, two-pass sample sentence, fixed prominence threshold (evidence-tuned from live diagnostic logging, not guessed), refractory period, stall detection, MAD-based outlier rejection. Found and fixed a reaction-time contamination bug in word-1 timing. Found (via live testing, not assumption) that showing the live target word made users consciously pace against the display, distorting the natural pace being measured — removed. Confirmed stall detection correctly catches and names real stuck words rather than silently corrupting the run. One open item carried forward: clamp bounds on `personalizedRate`/`MS_PER_SYLLABLE` were guessed against the wrong assumed ratio — real fits keep landing on the same clamp corner, needs real investigation before production use, not blocking Phase 11b. Full mechanics/constants/reasoning in Section 3 (kept dense given how load-bearing this is for anyone touching `main.js`'s rate step again).
 - **Entry 19 (Jul 19):** Resolved Entry 17's four open questions for Phase 11b (blended max() score; separate sharp pulse for hard failures; read off calibrated thresholds; hue+opacity/saturation for accessibility) and built it end-to-end — `#readingPane` ambient border in `index.html`, scoring/smoothing/pulse logic in `main.js`, reads off Phase 11's calibrated pose/cadence thresholds. Explicit audience-driven design call: asymmetric accumulate/recover rates and a pulse cooldown are deliberate, in service of "room for error, not zero error" for this app's specific low-motor-control audience, not just a general restatement of the project motto. Not yet deployed (deploy debt flagged) or live-tuned against a real session. Full mechanics in Section 3.
 - **Entry 20 (Jul 19):** Student live-tested Phase 11b before deploy and caught a real bug: border pinned at Trouble score 1.00 during completely normal smooth reading (clean MAR/pose/speech state), traced via the debug readout to Cadence showing `20576 / 574ms`. Root cause: cadence trouble was reusing `mouthOpenStartTime`/`currentWordExpectedMs` (Phase 6b), which only reset on a closed→open transition — Phase 6a's continuous-reading design means that transition can be dozens of words in the past, so "elapsed since mouth opened" grew unbounded against just one word's expected duration. Fixed with a dedicated per-word clock (`lastWordBoundaryTime`/`currentSpokenWordExpectedMs`) reset on every real word boundary via `highlightWordAt`, plus primed at the top of `speakFrom` to cover the pre-first-boundary gap and the same-word-resume case `highlightWordAt`'s no-op guard would've missed. Did not touch the original Phase 6b clock — still correct for its own (different) purpose. Deploy still outstanding — student to push both files to Vercel.
+- **Entry 21 (Jul 19):** Student deployed Phase 11b (with the Entry 20 fix) to Vercel and live-tested on the deployed app. Trouble score rested at 0.12-0.18 during normal reading, confirmed to feel right. Logged as expected baseline (continuous pose-distance measure + smoothing settle to just above 0, not a bug) rather than something to tune further absent a real complaint. Phase 11b marked fully closed out. Discussed next phase for the next chat: Phase 9 (mobile bug) vs. Phase 12 (distance/recalibration robustness), both still open — decision deferred to student.
+- **Entry 22 (Jul 19):** Student asked for a recommendation on Phase 9 vs. 12. Recommended and confirmed Phase 9 first — regression on existing working functionality (not new scope), small/isolated, working theory already narrowed down; Phase 12 is a robustness improvement with no urgency, can wait. Set as next action for the next chat.

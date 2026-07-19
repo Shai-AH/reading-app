@@ -249,6 +249,20 @@ let readingActive = false;      // true from Start Reading click until the whole
 let isSpeakingChunk = false;    // true while a (possibly multi-word) utterance is actively speaking
 let manualCancel = false;       // true right before we intentionally cancel() due to mouth closing
 let currentUtterance = null;
+// --- Phase 9 (diagnostic, temporary): mobile TTS restart bug investigation ---
+// Working theory (PROGRESS.md Section 3c): on the affected mobile browser/TTS
+// voice, `onboundary` events don't fire reliably, so `lastBoundaryOffset` goes
+// stale and reopening the mouth resumes from an old position instead of where
+// reading actually stopped. This counter/timestamp pair is NOT a fix — it's
+// instrumentation to confirm that theory on the real device before writing
+// any fix. Reset per-utterance in speakFrom(); bumped in onboundary. Displayed
+// live so you can watch, on the phone itself, whether the count keeps
+// climbing normally and then goes stale right before/at the restart moment.
+let boundaryEventCount = 0;
+let lastBoundaryEventTime = 0; // performance.now() of the most recent onboundary
+const boundaryCountValueEl = document.getElementById('boundaryCountValue');
+const lastBoundaryAgoValueEl = document.getElementById('lastBoundaryAgoValue');
+
 let baseOffset = 0;             // char offset into READING_TEXT where currentUtterance's text starts
 let lastBoundaryOffset = 0;     // charIndex within currentUtterance of the most recent word boundary
 let wordSpans = [];             // { span, start, end } built from READING_TEXT
@@ -1444,6 +1458,11 @@ function speakFrom(offset) {
   baseOffset = offset;
   lastBoundaryOffset = 0;
 
+  // Phase 9 (diagnostic): fresh utterance, fresh count. A stall theory is
+  // only meaningful measured within one utterance's boundary stream.
+  boundaryEventCount = 0;
+  boundaryCountValueEl.textContent = '0';
+
   // Phase 11b bugfix: prime the per-word cadence clock for the word at the
   // resume point right away, rather than only waiting for onboundary/
   // highlightWordAt to set it — there's a real gap between speak() being
@@ -1494,6 +1513,10 @@ function speakFrom(offset) {
   currentUtterance.onboundary = (event) => {
     if (event.name !== 'word') return;
     lastBoundaryOffset = event.charIndex;
+    // Phase 9 (diagnostic): record that a real boundary event landed.
+    boundaryEventCount += 1;
+    lastBoundaryEventTime = performance.now();
+    boundaryCountValueEl.textContent = String(boundaryEventCount);
     highlightWordAt(baseOffset + event.charIndex);
   };
 
@@ -1664,6 +1687,13 @@ function predictLoop() {
   // reading session for it to act on.
   if (!calibration.active && results.facialTransformationMatrixes && results.facialTransformationMatrixes.length > 0) {
     updateHeadPose(results.facialTransformationMatrixes[0].data);
+  }
+
+  // Phase 9 (diagnostic): live "ago" readout, independent of onboundary itself
+  // firing — this is the whole point, since a stalled boundary stream is
+  // exactly the case where nothing else would update this number for you.
+  if (readingActive && isSpeakingChunk && lastBoundaryEventTime > 0) {
+    lastBoundaryAgoValueEl.textContent = Math.round(performance.now() - lastBoundaryEventTime).toString();
   }
 
   // Phase 11b: reads mouthState/cadence/pose state that's all fresh as of
