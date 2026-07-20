@@ -413,12 +413,33 @@ const MIN_INTER_TROUGH_MS = 200;
 // Sane bounds for the regression output — guards against a noisy fit (e.g.
 // from a distracted run) producing an unusable/unintelligible personalized
 // rate or pacing. Centered around the DEFAULT_* constants above.
+//
+// MIN_MS_PER_SYLLABLE/MAX_BASE_WORD_MS updated (mobile testing session,
+// post-Entry-22): the original bounds (80 / 300) were guessed against the
+// assumption that per-syllable cost dominates a word's duration. A real
+// calibration run (console log, 28/28 words captured, clean two-pass fit)
+// showed the opposite shape for this user: raw fit msPerSyllable=3.4,
+// baseWordMs=642.7 — a large fixed per-word cost (mouth open/close
+// overhead) with almost no additional cost per syllable. The old bounds
+// didn't just trim that fit, they inverted it: msPerSyllable got floored
+// UP from 3.4 to 80 (24x), baseWordMs got capped DOWN from 642.7 to 300
+// (more than half), and the resulting personalizedRate came out as 1.272
+// (audibly fast) where the unclamped raw fit gives ~0.93 (slightly slow —
+// the sane answer for someone with heavy per-word overhead). Widened so a
+// real fit like this one passes through un-mangled. MIN_MS_PER_SYLLABLE
+// floors at 0 rather than removing the floor entirely — a NEGATIVE slope
+// (longer words taking less time) is still implausible and worth guarding
+// against; near-zero is not. MAX_BASE_WORD_MS raised to 800, giving
+// headroom above the one real data point seen so far while still guarding
+// against a genuinely runaway noisy fit. Revisit if real fits start
+// clustering near these new bounds the same way they did at the old ones —
+// same "the bound is wrong, not the fit" signal as before.
 const MIN_PERSONALIZED_RATE = 0.5;
 const MAX_PERSONALIZED_RATE = 2.0;
-const MIN_MS_PER_SYLLABLE = 80;
+const MIN_MS_PER_SYLLABLE = 0;
 const MAX_MS_PER_SYLLABLE = 500;
 const MIN_BASE_WORD_MS = 0;
-const MAX_BASE_WORD_MS = 300;
+const MAX_BASE_WORD_MS = 800;
 
 // --- Phase 11b: ambient trouble-shading ---
 // Addresses the detection-legibility paradox (Entry 17): the reader can't
@@ -1196,6 +1217,16 @@ function applyCalibration(data) {
   // `undefined` into MS_PER_SYLLABLE/PERSONALIZED_RATE, so an existing
   // user's saved MAR/pose calibration keeps working exactly as before until
   // they run the wizard again and pick up a Speed measurement too.
+  // Note (mobile testing session, post-Entry-22): MS_PER_SYLLABLE can now
+  // legitimately land very low (see MIN_MS_PER_SYLLABLE's comment above) —
+  // for a user whose real fit looks like that, expected duration during
+  // live reading will barely grow with word length, since it's applied
+  // uniformly to real reading text (not just the fixed sample sentence).
+  // That's the correct reflection of a real regression, not a bug to guess
+  // around pre-emptively — but if an unusually long real word starts
+  // getting cut off too early during actual reading (cadence threshold
+  // tightening before the word is realistically done), that's the concrete
+  // symptom to watch for and revisit against, not something to fix blind.
   if (typeof data.msPerSyllablePersonal === 'number') {
     MS_PER_SYLLABLE = data.msPerSyllablePersonal;
     BASE_WORD_MS = data.baseWordMsPersonal;
