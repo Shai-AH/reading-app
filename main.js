@@ -1115,6 +1115,12 @@ function finishCalibration() {
   // signal the bounds are wrong, not the fit.
   console.log(`[Phase 11 rate] raw fit: msPerSyllable=${fit.msPerSyllable.toFixed(1)}, ` +
     `baseWordMs=${fit.baseWordMs.toFixed(1)}`);
+  // Same numbers, on-screen — console.log requires a tethered debugging
+  // session on mobile, this doesn't. Filled in fully once personalizedRate
+  // is computed below.
+  const rateFitDebugValueEl = document.getElementById('rateFitDebugValue');
+  rateFitDebugValueEl.textContent =
+    `raw msPerSyll=${fit.msPerSyllable.toFixed(1)}, raw baseWordMs=${fit.baseWordMs.toFixed(1)}`;
 
   // Same margin logic used by hand for the original OPEN/CLOSE thresholds:
   // sit closeThreshold and openThreshold inside the neutral-to-mutter gap,
@@ -1163,6 +1169,10 @@ function finishCalibration() {
   // reasoning as the raw-fit log above — validates MIN/MAX_PERSONALIZED_RATE.
   console.log(`[Phase 11 rate] pre-clamp personalizedRate=${(genericExpected / personalExpected).toFixed(3)}, ` +
     `clamped=${personalizedRate.toFixed(3)}`);
+  rateFitDebugValueEl.textContent =
+    `raw msPerSyll=${fit.msPerSyllable.toFixed(1)}, raw baseWordMs=${fit.baseWordMs.toFixed(1)}, ` +
+    `clamped msPerSyll=${msPerSyllablePersonal.toFixed(1)}, clamped baseWordMs=${baseWordMsPersonal.toFixed(1)}, ` +
+    `pre-clamp rate=${(genericExpected / personalExpected).toFixed(3)}, final rate=${personalizedRate.toFixed(3)}`;
 
   const data = {
     openThreshold,
