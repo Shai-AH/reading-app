@@ -293,9 +293,26 @@ const DEFAULT_PITCH_THRESHOLD = 21;
 let YAW_THRESHOLD = DEFAULT_YAW_THRESHOLD;
 let PITCH_THRESHOLD = DEFAULT_PITCH_THRESHOLD;
 
+// Mobile testing fix (post-Entry-22): EMA smoothing on yaw/pitch before any
+// decision uses them. Raw single-frame yaw/pitch was fine on a stationary
+// laptop webcam — all noise was real head movement. On a handheld phone the
+// camera itself moves with hand tremor, and yaw/pitch (Phase 3) are measured
+// relative to the camera, not the world — tremor is indistinguishable from
+// real head rotation in this signal alone. Smoothing filters the
+// high-frequency tremor component while a genuine deliberate look-away
+// (sustained, and well past the 26°/21° thresholds) still comes through.
+// Same EMA shape as RATE_SMOOTHING_ALPHA (Speed step). Reasoned starting
+// guess, not yet live-tuned against real handheld footage — same tier as
+// every other new constant here before its first real test. If gating still
+// feels twitchy on mobile after this, lower it further (more smoothing,
+// more lag); if look-aways start feeling sluggish to register, raise it.
+const POSE_SMOOTHING_ALPHA = 0.2;
+
 let isFacingScreen = true;
 let lastYaw = 0;   // Phase 11b: most recent yaw/pitch, kept outside updateHeadPose's
 let lastPitch = 0; // own scope so the trouble-shading score (computed once per frame
+let smoothedYaw = null;   // EMA state for POSE_SMOOTHING_ALPHA — null until first real frame seeds it
+let smoothedPitch = null;
                     // in predictLoop) can read it without recomputing.
 
 const yawValueEl = document.getElementById('yawValue');
@@ -1370,10 +1387,18 @@ function updateHeadPose(matrixData) {
   const { yaw, pitch } = getYawPitch(matrixData);
   yawValueEl.textContent = yaw.toFixed(1);
   pitchValueEl.textContent = pitch.toFixed(1);
-  lastYaw = yaw;
-  lastPitch = pitch;
 
-  const facing = Math.abs(yaw) < YAW_THRESHOLD && Math.abs(pitch) < PITCH_THRESHOLD;
+  // See POSE_SMOOTHING_ALPHA's comment above. Display above stays raw (same
+  // convention as MAR: marValueEl always shows the raw instantaneous value,
+  // smoothing only applies to what decisions are made from) — lastYaw/
+  // lastPitch, which both the facing gate and computePoseTrouble() read,
+  // get the smoothed value.
+  smoothedYaw = smoothedYaw === null ? yaw : smoothedYaw + POSE_SMOOTHING_ALPHA * (yaw - smoothedYaw);
+  smoothedPitch = smoothedPitch === null ? pitch : smoothedPitch + POSE_SMOOTHING_ALPHA * (pitch - smoothedPitch);
+  lastYaw = smoothedYaw;
+  lastPitch = smoothedPitch;
+
+  const facing = Math.abs(smoothedYaw) < YAW_THRESHOLD && Math.abs(smoothedPitch) < PITCH_THRESHOLD;
   if (facing === isFacingScreen) return; // no state change, nothing else to do
 
   isFacingScreen = facing;
