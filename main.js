@@ -101,6 +101,14 @@ const CADENCE_OVER_FACTOR = 1.5;  // looser: threshold * 1.5
 
 let mouthOpenStartTime = 0;    // performance.now() when the current open phase began
 let currentWordExpectedMs = 0; // estimated duration for the word active when mouth opened
+// Mobile testing session (diagnostic): precise, non-eyeballed measurement of
+// the gap between "MAR first dropped below CLOSE_THRESHOLD" and "isMouthStopped
+// actually went true". Resets whenever MAR pops back above CLOSE_THRESHOLD, so
+// it always measures the most recent continuous below-threshold stretch, not
+// a stale earlier dip. This isolates exactly how long the movementRange
+// buffer (WINDOW_MS) takes to flush stale open-mouth samples, without any
+// human reaction-time noise in the number.
+let firstBelowCloseThresholdTime = null;
 
 const cadenceValueEl = document.getElementById('cadenceValue');
 
@@ -1495,7 +1503,21 @@ function updateMouthState(mar) {
     // filter guarantees is always < WINDOW_MS — so that gate was never true
     // and this whole branch was effectively dead code. Removed.)
     const isMouthStopped = mar < CLOSE_THRESHOLD && movementRange < dynamicRangeThreshold;
+
+    // Diagnostic: precise (non-eyeballed) gap measurement — see the variable's
+    // comment above.
+    if (mar < CLOSE_THRESHOLD) {
+      if (firstBelowCloseThresholdTime === null) firstBelowCloseThresholdTime = now;
+    } else {
+      firstBelowCloseThresholdTime = null;
+    }
+
     if (isMouthStopped) {
+      const gapMs = firstBelowCloseThresholdTime !== null
+        ? Math.round(now - firstBelowCloseThresholdTime)
+        : 0;
+      console.log(`[Phase 9 diag] MAR-below-threshold to detected-stop gap: ${gapMs}ms`);
+      movementRangeValueEl.textContent += ` | detection gap: ${gapMs}ms`;
       mouthState = 'closed';
       onMouthClosed();
     }
