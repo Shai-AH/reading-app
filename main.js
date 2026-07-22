@@ -256,6 +256,7 @@ const READING_TEXT = "This is a longer piece of test text for phase three. Inste
 let readingActive = false;      // true from Start Reading click until the whole text finishes
 let isSpeakingChunk = false;    // true while a (possibly multi-word) utterance is actively speaking
 let manualCancel = false;       // true right before we intentionally cancel() due to mouth closing
+let cancelRequestedTime = null; // performance.now() when cancel() was requested — diagnostic, see onend
 let currentUtterance = null;
 // --- Phase 9 (diagnostic, temporary): mobile TTS restart bug investigation ---
 // Working theory (PROGRESS.md Section 3c): on the affected mobile browser/TTS
@@ -269,6 +270,8 @@ let currentUtterance = null;
 let boundaryEventCount = 0;
 let lastBoundaryEventTime = 0; // performance.now() of the most recent onboundary
 const boundaryCountValueEl = document.getElementById('boundaryCountValue');
+const detectionGapValueEl = document.getElementById('detectionGapValue');
+const cancelStopGapValueEl = document.getElementById('cancelStopGapValue');
 const lastBoundaryAgoValueEl = document.getElementById('lastBoundaryAgoValue');
 
 let baseOffset = 0;             // char offset into READING_TEXT where currentUtterance's text starts
@@ -1517,7 +1520,10 @@ function updateMouthState(mar) {
         ? Math.round(now - firstBelowCloseThresholdTime)
         : 0;
       console.log(`[Phase 9 diag] MAR-below-threshold to detected-stop gap: ${gapMs}ms`);
-      movementRangeValueEl.textContent += ` | detection gap: ${gapMs}ms`;
+      // Sticky: its own element, only touched here (on an actual detected
+      // close), not overwritten by the per-frame movementRangeValueEl update
+      // above. Stays on screen exactly as-is until the next close.
+      detectionGapValueEl.textContent = `${gapMs}ms`;
       mouthState = 'closed';
       onMouthClosed();
     }
@@ -1543,6 +1549,7 @@ function onMouthClosed() {
   // engine after repeated use. We remember exactly where we got to (the last
   // completed word boundary) so the next mouth-open can pick up from there.
   manualCancel = true;
+  cancelRequestedTime = performance.now();
   speechSynthesis.cancel();
   isSpeakingChunk = false;
   speechStateEl.textContent = 'waiting for mouth to open';
@@ -1625,6 +1632,19 @@ function speakFrom(offset) {
       // This 'end' event fired because WE called cancel() (closing the mouth
       // or looking away), not because the text actually finished. Chromium
       // fires 'end' either way.
+      //
+      // Diagnostic (mobile testing session): how long between us requesting
+      // cancel() and the browser actually confirming it stopped? On desktop
+      // this has always been assumed near-instant. If mobile shows a real
+      // gap here, that's direct evidence the engine keeps talking for a
+      // while after cancel() is called — a platform-level TTS quirk, not a
+      // detection bug on our side (which the earlier tests already cleared).
+      if (cancelRequestedTime !== null) {
+        const stopGapMs = Math.round(performance.now() - cancelRequestedTime);
+        console.log(`[Phase 9 diag] cancel() to onend gap: ${stopGapMs}ms`);
+        cancelStopGapValueEl.textContent = `${stopGapMs}ms`;
+        cancelRequestedTime = null;
+      }
       manualCancel = false;
       return;
     }
