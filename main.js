@@ -1471,6 +1471,17 @@ function updateMouthState(mar) {
       ? STOPPED_RANGE_THRESHOLD * CADENCE_UNDER_FACTOR
       : STOPPED_RANGE_THRESHOLD * CADENCE_OVER_FACTOR;
 
+    // Diagnostic (mobile testing session): show the threshold actually being
+    // compared against, and which phase we're in, right next to the raw
+    // movement-range number. If mobile's MAR noise floor sits between the
+    // "under" (tight) and "over" (loose) thresholds, this will show
+    // movementRange hovering just above the tight number for the whole
+    // "under" phase, then clearing once "over" kicks in — the live,
+    // on-screen version of the theory rather than something to take on faith.
+    movementRangeValueEl.textContent =
+      `${movementRange.toFixed(4)} (need < ${dynamicRangeThreshold.toFixed(4)}, ` +
+      `${elapsedMs < currentWordExpectedMs ? 'under' : 'over'} phase)`;
+
     // Two conditions, both required (Option A base case):
     //  1. Current MAR is actually down in the closed region (not just "not
     //     moving" — a mouth held open steadily would also show a flat range,
