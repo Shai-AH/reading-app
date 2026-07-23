@@ -1582,19 +1582,21 @@ function speakFrom(offset) {
     ? estimateWordDuration(wordSpans[resumeWordIdx].span.textContent)
     : 0;
 
-  // Phase 8, final (Entry 16): one utterance per resume, no chaining. Two
-  // chaining attempts within this same session both failed with
-  // different symptoms — state desync, then a silent freeze where speak()
-  // is called but no events ever return. This matches Chromium's documented
-  // unreliability with repeated speak() calls in one session: it can stop
-  // firing events with no error to catch or recover from. Explicitly
-  // rejected, same category as ROI cropping / the mic safeguard — not
-  // fixable within a $0/no-alternate-TTS-API budget. Tone is decided once
-  // per resume (mouth-open or click), from whichever sentence the resume
-  // point falls inside, and holds for the rest of that utterance. Known,
-  // accepted limitation: during smooth continuous reading (few real mouth
-  // closes, by design — see Phase 6a), tone may rarely change.
-  currentUtterance = new SpeechSynthesisUtterance(READING_TEXT.slice(offset));
+  // Phase 8, final (Entry 16): one utterance per resume, no chaining via
+  // speak()-from-inside-onend — that's what wedged Chrome's speech engine
+  // twice. Still true here. What changes in Phase 9a is how much text one
+  // utterance covers.
+  //
+  // Phase 9a: bound this utterance to one sentence, not "everything left in
+  // READING_TEXT" — see PROGRESS.md Section 3. Root cause on mobile Chrome:
+  // onboundary never fires at all, and cancel() doesn't reliably trigger
+  // onend either, so a mid-utterance cancel() can let speech run on for a
+  // while with nothing to catch it. Capping each utterance's length caps
+  // how far that overrun can possibly go, even when the platform bug fires.
+  // Reuses findSentenceEnd() (built for Phase 8a's tone toggle) as the chunk
+  // boundary, so tone below can also reuse chunkEnd instead of recomputing it.
+  const chunkEnd = findSentenceEnd(READING_TEXT, offset);
+  currentUtterance = new SpeechSynthesisUtterance(READING_TEXT.slice(offset, chunkEnd));
 
   // Phase 11: PERSONALIZED_RATE is applied unconditionally now (it defaults
   // to 1.0 — the untouched Web Speech default — until the user calibrates,
@@ -1605,8 +1607,7 @@ function speakFrom(offset) {
   // speed — both should apply at once rather than tone silently discarding
   // the personalization, or personalization ignoring tone's intent.
   if (toneEnabled) {
-    const sentenceEnd = findSentenceEnd(READING_TEXT, offset);
-    const sentenceText = READING_TEXT.slice(offset, sentenceEnd);
+    const sentenceText = READING_TEXT.slice(offset, chunkEnd);
     const tone = getToneForSentence(sentenceText);
     currentUtterance.pitch = tone.pitch;
     currentUtterance.rate = tone.rate * PERSONALIZED_RATE;
@@ -1630,7 +1631,7 @@ function speakFrom(offset) {
     isSpeakingChunk = false;
     if (manualCancel) {
       // This 'end' event fired because WE called cancel() (closing the mouth
-      // or looking away), not because the text actually finished. Chromium
+      // or looking away), not because the chunk actually finished. Chromium
       // fires 'end' either way.
       //
       // Diagnostic (mobile testing session): how long between us requesting
@@ -1648,7 +1649,36 @@ function speakFrom(offset) {
       manualCancel = false;
       return;
     }
-    finishReading();
+
+    // Natural completion of THIS CHUNK (not a manualCancel) — with Phase 9a,
+    // that no longer means "reached the end of READING_TEXT". Check which.
+    if (chunkEnd >= READING_TEXT.length) {
+      finishReading();
+      return;
+    }
+
+    // More text remains after this chunk. onend firing here (not via
+    // manualCancel) means the ENTIRE chunk was spoken, full stop — so the
+    // resume point is unconditionally "end of this chunk", regardless of
+    // whether onboundary fired reliably along the way. This matters even
+    // when boundary events DID fire normally (e.g. desktop): the last
+    // onboundary only marks the START of the chunk's last word, not its
+    // end, so trusting it here would resume by re-speaking that last word.
+    lastBoundaryOffset = chunkEnd - offset;
+
+    // Continue into the next sentence immediately if the mouth is still
+    // open — mirrors the existing "already open on return" pattern in
+    // updateHeadPose (Phase 7, Entry 11) — but routed through onMouthOpen()'s
+    // normal gating (facing screen, reading active, isSpeakingChunk) rather
+    // than calling speak() directly here. That's the distinction from Entry
+    // 16's rejected auto-chaining: the next speak() still only ever fires
+    // through the same controlled path a real mouth-open/click uses, not a
+    // bespoke self-continue embedded in onend.
+    if (mouthState === 'open' && isFacingScreen) {
+      onMouthOpen();
+    } else {
+      speechStateEl.textContent = 'waiting for mouth to open';
+    }
   };
 
   isSpeakingChunk = true;
