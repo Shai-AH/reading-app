@@ -319,6 +319,19 @@ let PITCH_THRESHOLD = DEFAULT_PITCH_THRESHOLD;
 // more lag); if look-aways start feeling sluggish to register, raise it.
 const POSE_SMOOTHING_ALPHA = 0.2;
 
+// Phase 9b: distinct from the yaw/pitch-exceeds-threshold gate above — this
+// covers MediaPipe returning zero landmarks at all (camera pointed away
+// entirely, obstructed, etc). Confirmed by code inspection (Entry 23): that
+// case previously just skipped the frame silently, so isFacingScreen/
+// mouthState froze at whatever they last were and TTS kept speaking
+// indefinitely with nobody in frame. Not mobile-exclusive — same gap exists
+// on laptop, just less likely to be triggered there. A short timeout rather
+// than an immediate trip, so one dropped frame (camera hiccup, brief motion
+// blur) doesn't falsely gate — same reasoning as POSE_SMOOTHING_ALPHA above,
+// different mechanism (missing data vs. noisy data).
+const NO_FACE_TIMEOUT_MS = 500;
+let noFaceSince = null; // performance.now() timestamp of when landmarks last went missing, or null while a face is being seen
+
 let isFacingScreen = true;
 let lastYaw = 0;   // Phase 11b: most recent yaw/pitch, kept outside updateHeadPose's
 let lastPitch = 0; // own scope so the trouble-shading score (computed once per frame
@@ -1582,21 +1595,19 @@ function speakFrom(offset) {
     ? estimateWordDuration(wordSpans[resumeWordIdx].span.textContent)
     : 0;
 
-  // Phase 8, final (Entry 16): one utterance per resume, no chaining via
-  // speak()-from-inside-onend — that's what wedged Chrome's speech engine
-  // twice. Still true here. What changes in Phase 9a is how much text one
-  // utterance covers.
-  //
-  // Phase 9a: bound this utterance to one sentence, not "everything left in
-  // READING_TEXT" — see PROGRESS.md Section 3. Root cause on mobile Chrome:
-  // onboundary never fires at all, and cancel() doesn't reliably trigger
-  // onend either, so a mid-utterance cancel() can let speech run on for a
-  // while with nothing to catch it. Capping each utterance's length caps
-  // how far that overrun can possibly go, even when the platform bug fires.
-  // Reuses findSentenceEnd() (built for Phase 8a's tone toggle) as the chunk
-  // boundary, so tone below can also reuse chunkEnd instead of recomputing it.
-  const chunkEnd = findSentenceEnd(READING_TEXT, offset);
-  currentUtterance = new SpeechSynthesisUtterance(READING_TEXT.slice(offset, chunkEnd));
+  // Phase 8, final (Entry 16): one utterance per resume, no chaining. Two
+  // chaining attempts within this same session both failed with
+  // different symptoms — state desync, then a silent freeze where speak()
+  // is called but no events ever return. This matches Chromium's documented
+  // unreliability with repeated speak() calls in one session: it can stop
+  // firing events with no error to catch or recover from. Explicitly
+  // rejected, same category as ROI cropping / the mic safeguard — not
+  // fixable within a $0/no-alternate-TTS-API budget. Tone is decided once
+  // per resume (mouth-open or click), from whichever sentence the resume
+  // point falls inside, and holds for the rest of that utterance. Known,
+  // accepted limitation: during smooth continuous reading (few real mouth
+  // closes, by design — see Phase 6a), tone may rarely change.
+  currentUtterance = new SpeechSynthesisUtterance(READING_TEXT.slice(offset));
 
   // Phase 11: PERSONALIZED_RATE is applied unconditionally now (it defaults
   // to 1.0 — the untouched Web Speech default — until the user calibrates,
@@ -1607,7 +1618,8 @@ function speakFrom(offset) {
   // speed — both should apply at once rather than tone silently discarding
   // the personalization, or personalization ignoring tone's intent.
   if (toneEnabled) {
-    const sentenceText = READING_TEXT.slice(offset, chunkEnd);
+    const sentenceEnd = findSentenceEnd(READING_TEXT, offset);
+    const sentenceText = READING_TEXT.slice(offset, sentenceEnd);
     const tone = getToneForSentence(sentenceText);
     currentUtterance.pitch = tone.pitch;
     currentUtterance.rate = tone.rate * PERSONALIZED_RATE;
@@ -1631,7 +1643,7 @@ function speakFrom(offset) {
     isSpeakingChunk = false;
     if (manualCancel) {
       // This 'end' event fired because WE called cancel() (closing the mouth
-      // or looking away), not because the chunk actually finished. Chromium
+      // or looking away), not because the text actually finished. Chromium
       // fires 'end' either way.
       //
       // Diagnostic (mobile testing session): how long between us requesting
@@ -1649,39 +1661,7 @@ function speakFrom(offset) {
       manualCancel = false;
       return;
     }
-
-    // Natural completion of THIS CHUNK (not a manualCancel) — with Phase 9a,
-    // that no longer means "reached the end of READING_TEXT". Check which.
-    if (chunkEnd >= READING_TEXT.length) {
-      finishReading();
-      return;
-    }
-
-    // More text remains after this chunk. onend firing here (not via
-    // manualCancel) means the ENTIRE chunk was spoken, full stop — so the
-    // resume point is unconditionally "end of this chunk", regardless of
-    // whether onboundary fired reliably along the way. This matters even
-    // when boundary events DID fire normally (e.g. desktop): the last
-    // onboundary only marks the START of the chunk's last word, not its
-    // end, so trusting it here would resume by re-speaking that last word.
-    lastBoundaryOffset = chunkEnd - offset;
-
-    // Confirmed via live testing (this session): calling onMouthOpen() (and
-    // therefore speakFrom -> speak()) from inside onend — even routed
-    // through the normal gating function — reproduced the exact freeze
-    // Entry 16 already hit twice with direct auto-chaining. Wrapping it in
-    // onMouthOpen() didn't change the underlying browser-level trigger:
-    // speak() called off a previous utterance's onend, in the same session.
-    // So: never do that, full stop. A finished chunk always stops and waits
-    // for a genuinely fresh signal — a real closed->open mouth transition
-    // (detected next frame in updateMouthState) or a word click — same as
-    // every other resume in this app. Known cost: if the mouth stays open
-    // continuously across a sentence boundary, reading pauses there until
-    // the user closes and reopens their mouth (or clicks) — smooth
-    // continuous reading (Phase 6a) no longer spans sentence boundaries
-    // uninterrupted. Accepted given three confirmed failures of any
-    // onend-triggered continuation, direct or disguised.
-    speechStateEl.textContent = 'waiting for mouth to open';
+    finishReading();
   };
 
   isSpeakingChunk = true;
@@ -1795,6 +1775,8 @@ function predictLoop() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+    noFaceSince = null; // Phase 9b: a face is visible again, clear the gap timer
+
     const drawingUtils = new DrawingUtils(ctx);
     for (const landmarks of results.faceLandmarks) {
       drawingUtils.drawConnectors(
@@ -1828,6 +1810,23 @@ function predictLoop() {
       updateCalibration(mar, yaw, pitch);
     } else {
       updateMouthState(mar);
+    }
+  } else {
+    // Phase 9b: zero landmarks this frame — start (or continue) the gap
+    // timer. Once it's been missing long enough, treat it the same way a
+    // yaw/pitch threshold trip is treated: stop speech and flip the facing
+    // indicator, so a reader who's walked away or turned the camera off
+    // doesn't get talked at indefinitely. Guarded on isFacingScreen so this
+    // only fires once per gap, not every frame after the timeout — same
+    // idempotency shape as updateHeadPose's "facing === isFacingScreen ?
+    // return" early-out.
+    if (noFaceSince === null) {
+      noFaceSince = performance.now();
+    } else if (readingActive && isFacingScreen && (performance.now() - noFaceSince) >= NO_FACE_TIMEOUT_MS) {
+      isFacingScreen = false;
+      facingStateEl.textContent = 'no face detected';
+      maybeFireTroublePulse();
+      onMouthClosed();
     }
   }
 
