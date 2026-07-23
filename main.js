@@ -1666,19 +1666,22 @@ function speakFrom(offset) {
     // end, so trusting it here would resume by re-speaking that last word.
     lastBoundaryOffset = chunkEnd - offset;
 
-    // Continue into the next sentence immediately if the mouth is still
-    // open — mirrors the existing "already open on return" pattern in
-    // updateHeadPose (Phase 7, Entry 11) — but routed through onMouthOpen()'s
-    // normal gating (facing screen, reading active, isSpeakingChunk) rather
-    // than calling speak() directly here. That's the distinction from Entry
-    // 16's rejected auto-chaining: the next speak() still only ever fires
-    // through the same controlled path a real mouth-open/click uses, not a
-    // bespoke self-continue embedded in onend.
-    if (mouthState === 'open' && isFacingScreen) {
-      onMouthOpen();
-    } else {
-      speechStateEl.textContent = 'waiting for mouth to open';
-    }
+    // Confirmed via live testing (this session): calling onMouthOpen() (and
+    // therefore speakFrom -> speak()) from inside onend — even routed
+    // through the normal gating function — reproduced the exact freeze
+    // Entry 16 already hit twice with direct auto-chaining. Wrapping it in
+    // onMouthOpen() didn't change the underlying browser-level trigger:
+    // speak() called off a previous utterance's onend, in the same session.
+    // So: never do that, full stop. A finished chunk always stops and waits
+    // for a genuinely fresh signal — a real closed->open mouth transition
+    // (detected next frame in updateMouthState) or a word click — same as
+    // every other resume in this app. Known cost: if the mouth stays open
+    // continuously across a sentence boundary, reading pauses there until
+    // the user closes and reopens their mouth (or clicks) — smooth
+    // continuous reading (Phase 6a) no longer spans sentence boundaries
+    // uninterrupted. Accepted given three confirmed failures of any
+    // onend-triggered continuation, direct or disguised.
+    speechStateEl.textContent = 'waiting for mouth to open';
   };
 
   isSpeakingChunk = true;
