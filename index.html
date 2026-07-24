@@ -72,7 +72,7 @@
   </div>
 
   <div id="controls" style="margin-top: 10px;">
-    <button id="startBtn">Start Reading</button>
+    <button id="startBtn" disabled>Start Reading</button>
     <button id="calibrateBtn">Calibrate</button>
     <label style="margin-left: 12px;">
       <input type="checkbox" id="toneToggle">
@@ -87,6 +87,26 @@
     <div id="calibrationMessage" style="margin-top: 6px; color: #b00020;"></div>
     <button id="calibrationCancelBtn" style="margin-top: 8px;">Cancel</button>
     <button id="calibrationRetryBtn" style="margin-top: 8px; display:none;">Retry</button>
+  </div>
+
+  <!-- Phase 10a: text input. Functional only (no styling pass — that's 10c).
+       The textarea is the single source of truth: type/paste directly into
+       it to test the app without any file, OR pick a .txt file to load its
+       contents into the box, then click "Load Text" either way. Keeping one
+       load action for both paths avoids two divergent code paths and lets
+       the student review/edit an uploaded file's text before committing it. -->
+  <div id="textInputPanel" style="margin-top: 10px; padding: 12px; border: 1px solid #ccc; max-width: 640px; background: #fafafa;">
+    <div style="font-weight: bold;">Reading text</div>
+    <textarea id="textInputArea" rows="6"
+      style="width: 100%; margin-top: 6px; font-family: inherit; font-size: 14px; box-sizing: border-box;"
+      placeholder="Type or paste text here to test the app, or upload a .txt file below..."></textarea>
+    <div style="margin-top: 6px;">
+      <input type="file" id="txtFileInput" accept=".txt">
+      <button id="loadTextBtn" style="margin-left: 8px;">Load Text</button>
+    </div>
+    <div id="textLoadStatus" style="margin-top: 6px; font-size: 13px; color: #555;">
+      No text loaded yet — type/paste above or upload a .txt file, then click Load Text.
+    </div>
   </div>
 
   <div id="readingPane">

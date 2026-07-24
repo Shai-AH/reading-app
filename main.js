@@ -241,17 +241,34 @@ function getToneForSentence(sentenceText) {
   return { pitch: 1.0, rate: 1.0, label: 'on, neutral' };
 }
 
-// --- Phase 3: longer pre-loaded text, word-by-word highlighting ---
-// TEMPORARY (Phase 8): the trailing sentence below was added purely so the
-// emotional-tone toggle has a '?' and a '!' to react to during testing — the
-// original text only had periods/commas. Remove/replace once Phase 10 (real
-// text input) ships; not a permanent part of the reading content.
-const READING_TEXT = "This is a longer piece of test text for phase three. Instead of a single " +
+// --- Phase 10a: text input (paste/type + .txt upload) ---
+// Replaces the old hardcoded READING_TEXT const from Phase 3. currentText is
+// now mutable and starts as null (no default reading content) — Start
+// Reading stays disabled (see updateStartButtonState) until real text is
+// loaded, either by the student typing/pasting + clicking "Load Text", a
+// .txt upload, or a restored previous session from localStorage.
+//
+// Kept only as a convenience prefill for the textarea at startup (NOT as
+// currentText) so the old '?'/'!' test sentence — added in Phase 8 purely to
+// give the tone toggle punctuation to react to — is still one click away
+// for quick testing, without being baked into the app's actual logic.
+const SAMPLE_TEXT_FOR_TESTING = "This is a longer piece of test text for phase three. Instead of a single " +
   "short sentence, we now advance word by word while you read, using the same mouth movement " +
   "signal from phase two. As each word is spoken it should highlight on screen, and if you turn " +
   "your head away from the camera the reading should pause automatically, even if your mouth is " +
   "still moving. Wait, did you hear that? That was surprising! This next part should sound " +
   "different, exciting even!";
+
+const TEXT_STORAGE_KEY = 'readingAppText';
+
+let currentText = null;           // the active reading text; null until loaded
+let lastLoadedFileName = null;    // set on .txt upload, cleared on manual textarea edits —
+                                   // lets the status line say "notes.txt" vs "pasted/typed text"
+
+const textInputAreaEl = document.getElementById('textInputArea');
+const txtFileInputEl = document.getElementById('txtFileInput');
+const loadTextBtnEl = document.getElementById('loadTextBtn');
+const textLoadStatusEl = document.getElementById('textLoadStatus');
 
 let readingActive = false;      // true from Start Reading click until the whole text finishes
 let isSpeakingChunk = false;    // true while a (possibly multi-word) utterance is actively speaking
@@ -274,9 +291,9 @@ const detectionGapValueEl = document.getElementById('detectionGapValue');
 const cancelStopGapValueEl = document.getElementById('cancelStopGapValue');
 const lastBoundaryAgoValueEl = document.getElementById('lastBoundaryAgoValue');
 
-let baseOffset = 0;             // char offset into READING_TEXT where currentUtterance's text starts
+let baseOffset = 0;             // char offset into currentText where currentUtterance's text starts
 let lastBoundaryOffset = 0;     // charIndex within currentUtterance of the most recent word boundary
-let wordSpans = [];             // { span, start, end } built from READING_TEXT
+let wordSpans = [];             // { span, start, end } built from currentText
 let activeWordIndex = -1;
 let lastWordBoundaryTime = 0;        // Phase 11b (fixed): performance.now() at the most recent onboundary
 let currentSpokenWordExpectedMs = 0; // expected duration for the word currently being spoken
@@ -745,7 +762,7 @@ function startCalibration() {
 function cancelCalibration() {
   calibration.active = false;
   calibrationPanel.style.display = 'none';
-  startBtn.disabled = false;
+  updateStartButtonState();
   calibrateBtn.disabled = false;
 }
 
@@ -1238,7 +1255,7 @@ function finishCalibration() {
   calibrationInstructionEl.textContent = 'Your thresholds have been saved for this device.';
   calibrationCountdownEl.textContent = '';
   calibration.active = false;
-  startBtn.disabled = false;
+  updateStartButtonState();
   calibrateBtn.disabled = false;
   setTimeout(() => { calibrationPanel.style.display = 'none'; }, 2000);
 }
@@ -1247,7 +1264,7 @@ function showCalibrationFailure(message) {
   calibration.active = false;
   calibrationMessageEl.textContent = message;
   calibrationRetryBtn.style.display = 'inline-block';
-  startBtn.disabled = false;
+  updateStartButtonState();
   calibrateBtn.disabled = false;
 }
 
@@ -1332,6 +1349,149 @@ function buildWordSpans(text) {
   }
   return spans;
 }
+
+// --- Phase 10a: text loading, persistence, and session reset ---
+
+function hasLoadedText() {
+  return typeof currentText === 'string' && currentText.trim().length > 0;
+}
+
+// Start Reading must reflect real text availability at all times, including
+// through the calibration flow (which unconditionally re-enables startBtn on
+// cancel/complete/failure) — centralizing this here means every one of those
+// call sites can just call this instead of guessing startBtn.disabled = false
+// is always correct.
+function updateStartButtonState() {
+  startBtn.disabled = !hasLoadedText() || (calibration && calibration.active);
+}
+
+function wordCount(text) {
+  const trimmed = text.trim();
+  return trimmed.length === 0 ? 0 : trimmed.split(/\s+/).length;
+}
+
+// Single entry point for adopting new reading text, whether from the Load
+// Text button, a restored localStorage session, or (future) 10d's PDF
+// extraction. Hard-stops any in-progress reading session first — loading new
+// text mid-read would otherwise leave baseOffset/wordSpans pointing at text
+// that no longer matches what's on screen. cancel() is safe to call even
+// when nothing is speaking (same reasoning as startBtn's click handler).
+function setCurrentText(text, sourceLabel, opts = {}) {
+  const persist = opts.persist !== false;
+
+  manualCancel = true;
+  speechSynthesis.cancel();
+  isSpeakingChunk = false;
+  readingActive = false;
+
+  currentText = text;
+  wordSpans = buildWordSpans(currentText);
+  activeWordIndex = -1;
+  baseOffset = 0;
+  lastBoundaryOffset = 0;
+  resetTroubleShading();
+  speechStateEl.textContent = 'idle (new text loaded)';
+
+  const n = wordCount(currentText);
+  textLoadStatusEl.style.color = '#555';
+  textLoadStatusEl.textContent = `Loaded: ${sourceLabel} (${n} word${n === 1 ? '' : 's'}).`;
+
+  updateStartButtonState();
+
+  if (persist) {
+    try {
+      localStorage.setItem(TEXT_STORAGE_KEY, JSON.stringify({
+        text: currentText,
+        sourceLabel,
+        savedAt: new Date().toISOString()
+      }));
+    } catch (err) {
+      console.error('Could not save reading text:', err);
+    }
+  }
+}
+
+function showTextLoadError(message) {
+  textLoadStatusEl.style.color = '#b00020';
+  textLoadStatusEl.textContent = message;
+}
+
+// Runs once at startup, alongside loadSavedCalibration(). If a previous
+// session's text is found, restore it into both currentText and the
+// textarea (so it's visible/editable) and enable Start immediately, same as
+// if it had just been loaded this session.
+function loadSavedText() {
+  let raw;
+  try {
+    raw = localStorage.getItem(TEXT_STORAGE_KEY);
+  } catch (err) {
+    console.error('Could not read saved reading text:', err);
+    return;
+  }
+  if (!raw) return;
+
+  try {
+    const data = JSON.parse(raw);
+    if (typeof data.text !== 'string' || data.text.trim().length === 0) return;
+    textInputAreaEl.value = data.text;
+    const when = new Date(data.savedAt).toLocaleString();
+    setCurrentText(data.text, `restored from last session, ${when}`, { persist: false });
+  } catch (err) {
+    console.error('Saved reading text was corrupted, ignoring:', err);
+  }
+}
+
+loadTextBtnEl.addEventListener('click', () => {
+  const text = textInputAreaEl.value;
+  if (text.trim().length === 0) {
+    showTextLoadError('The text box is empty — type/paste some text or upload a .txt file first.');
+    return;
+  }
+  const sourceLabel = lastLoadedFileName ? lastLoadedFileName : 'pasted/typed text';
+  setCurrentText(text, sourceLabel);
+});
+
+// Editing the box by hand after a file was loaded into it means the content
+// no longer strictly matches that file — drop the filename hint so the next
+// Load Text click is correctly labeled "pasted/typed text" instead of lying
+// about the source.
+textInputAreaEl.addEventListener('input', () => {
+  lastLoadedFileName = null;
+});
+
+txtFileInputEl.addEventListener('change', () => {
+  const file = txtFileInputEl.files[0];
+  if (!file) return;
+
+  if (!file.name.toLowerCase().endsWith('.txt')) {
+    showTextLoadError('Please choose a .txt file (PDF upload is coming in a later phase).');
+    txtFileInputEl.value = '';
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    const text = String(reader.result);
+    if (text.trim().length === 0) {
+      showTextLoadError(`"${file.name}" appears to be empty.`);
+      return;
+    }
+    textInputAreaEl.value = text;
+    lastLoadedFileName = file.name;
+    textLoadStatusEl.style.color = '#555';
+    textLoadStatusEl.textContent = `"${file.name}" loaded into the box below — click Load Text to use it.`;
+  };
+  reader.onerror = () => {
+    showTextLoadError(`Could not read "${file.name}": ${reader.error}`);
+  };
+  reader.readAsText(file);
+  txtFileInputEl.value = ''; // allow re-selecting the same file later if edited/reloaded
+});
+
+// Convenience prefill only — does not touch currentText, so Start stays
+// disabled until the student actually clicks Load Text (or a saved session
+// is restored, which runs after this and will overwrite it).
+textInputAreaEl.value = SAMPLE_TEXT_FOR_TESTING;
 
 // --- Phase 4: click-to-word manual resync (State 3) ---
 // Lets the reader jump the reading position directly to any word by clicking it,
@@ -1569,7 +1729,7 @@ function onMouthClosed() {
 }
 
 function speakFrom(offset) {
-  if (offset >= READING_TEXT.length) {
+  if (offset >= currentText.length) {
     finishReading();
     return;
   }
@@ -1607,7 +1767,7 @@ function speakFrom(offset) {
   // point falls inside, and holds for the rest of that utterance. Known,
   // accepted limitation: during smooth continuous reading (few real mouth
   // closes, by design — see Phase 6a), tone may rarely change.
-  currentUtterance = new SpeechSynthesisUtterance(READING_TEXT.slice(offset));
+  currentUtterance = new SpeechSynthesisUtterance(currentText.slice(offset));
 
   // Phase 11: PERSONALIZED_RATE is applied unconditionally now (it defaults
   // to 1.0 — the untouched Web Speech default — until the user calibrates,
@@ -1618,8 +1778,8 @@ function speakFrom(offset) {
   // speed — both should apply at once rather than tone silently discarding
   // the personalization, or personalization ignoring tone's intent.
   if (toneEnabled) {
-    const sentenceEnd = findSentenceEnd(READING_TEXT, offset);
-    const sentenceText = READING_TEXT.slice(offset, sentenceEnd);
+    const sentenceEnd = findSentenceEnd(currentText, offset);
+    const sentenceText = currentText.slice(offset, sentenceEnd);
     const tone = getToneForSentence(sentenceText);
     currentUtterance.pitch = tone.pitch;
     currentUtterance.rate = tone.rate * PERSONALIZED_RATE;
@@ -1681,6 +1841,10 @@ function finishReading() {
 }
 
 startBtn.addEventListener('click', () => {
+  // Phase 10a: startBtn is disabled whenever hasLoadedText() is false, but
+  // guard here too rather than trust the DOM disabled state alone.
+  if (!hasLoadedText()) return;
+
   // Hard reset on every click, rather than trusting readingActive/isSpeakingChunk
   // to be accurate. speechSynthesis state has proven flaky enough this session
   // that relying on our own flags alone was leaving the button stuck unusable
@@ -1691,7 +1855,7 @@ startBtn.addEventListener('click', () => {
   isSpeakingChunk = false;
   readingActive = false;
 
-  wordSpans = buildWordSpans(READING_TEXT);
+  wordSpans = buildWordSpans(currentText);
   activeWordIndex = -1;
   baseOffset = 0;
   lastBoundaryOffset = 0;
@@ -1724,6 +1888,7 @@ async function setup() {
   });
 
   loadSavedCalibration();
+  loadSavedText();
   startWebcam();
 }
 
