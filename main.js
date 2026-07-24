@@ -3,6 +3,50 @@ import { FaceLandmarker, FilesetResolver, DrawingUtils } from "https://cdn.jsdel
 const video = document.getElementById('webcam');
 const canvas = document.getElementById('overlay');
 const ctx = canvas.getContext('2d');
+const videoContainer = document.getElementById('container');
+
+// --- Phase 10c: webcam/mesh visibility ---
+// Decided in scoping (Entry 27): the live camera feed + mesh overlay is
+// only useful to look at while the calibration wizard needs the student to
+// position themselves; during an actual reading session (the app's real
+// use case — reading in bed/dark, low-focus readers, ALS/paralysis users)
+// there's no reason to show it. Tracking itself is untouched — MediaPipe
+// keeps reading frames off the <video> element regardless of whether it's
+// visible, so this is a CSS-only visibility toggle, not a functional
+// change. Hidden by default via the .video-hidden class already present in
+// index.html; only the calibration entry/exit points below turn it on/off,
+// matching the resolved "assumption confirmed" open question from Entry 27
+// (visually hidden, not removed from the DOM, since tracking must keep
+// running underneath regardless of visibility).
+function setCalibrationVideoVisible(visible) {
+  videoContainer.classList.toggle('video-hidden', !visible);
+}
+
+// Phase 10c (folded-in former Phase 10b): the calibration view is the only
+// place the video is actually shown now, so it's the only place the old
+// hardcoded-640x480-stretches-a-portrait-stream bug still matters. Rather
+// than a mobile-only special case, this sizes the box to the *real*
+// stream's aspect ratio (whatever it is) and caps it to fit the viewport,
+// so it's correct on any device/orientation instead of assuming 4:3.
+function updateVideoBoxSize() {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh) return; // metadata not loaded yet
+
+  const maxWidth = Math.min(640, window.innerWidth - 48);
+  const width = Math.max(160, maxWidth); // sane floor for very narrow screens
+  const height = Math.round(width * (vh / vw));
+
+  videoContainer.style.width = width + 'px';
+  videoContainer.style.height = height + 'px';
+  video.style.width = width + 'px';
+  video.style.height = height + 'px';
+  canvas.style.width = width + 'px';
+  canvas.style.height = height + 'px';
+}
+video.addEventListener('loadedmetadata', updateVideoBoxSize);
+window.addEventListener('resize', updateVideoBoxSize);
+window.addEventListener('orientationchange', updateVideoBoxSize);
 
 let faceLandmarker;
 
@@ -756,12 +800,14 @@ function startCalibration() {
   calibrationRetryBtn.style.display = 'none';
   calibrationMessageEl.textContent = '';
   calibrationPanel.style.display = 'block';
+  setCalibrationVideoVisible(true); // student needs to see themselves to position for calibration
   renderCalibrationStep();
 }
 
 function cancelCalibration() {
   calibration.active = false;
   calibrationPanel.style.display = 'none';
+  setCalibrationVideoVisible(false);
   updateStartButtonState();
   calibrateBtn.disabled = false;
 }
@@ -1257,7 +1303,10 @@ function finishCalibration() {
   calibration.active = false;
   updateStartButtonState();
   calibrateBtn.disabled = false;
-  setTimeout(() => { calibrationPanel.style.display = 'none'; }, 2000);
+  setTimeout(() => {
+    calibrationPanel.style.display = 'none';
+    setCalibrationVideoVisible(false);
+  }, 2000);
 }
 
 function showCalibrationFailure(message) {

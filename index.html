@@ -2,9 +2,138 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Reading App — Face Mesh Test</title>
+  <meta name="color-scheme" content="dark">
+  <title>Mumblew — silent read-along</title>
   <style>
-    #container { position: relative; width: 640px; height: 480px; }
+    /* Phase 10c: design tokens derived from the Mumblew logo (Entry 27).
+       Dark, teal-tinted background rather than pure black/navy so the
+       logo's gradient accents (teal/blue/gold/coral/pink) read as part of
+       the same family instead of floating on a generic dark-mode gray.
+       Accent usage stays restrained: teal carries most interactive weight,
+       amber is reserved for the reading highlight, coral/pink stay rare. */
+    :root {
+      --bg: #0D1417;
+      --surface: #16221F;
+      --surface-raised: #1C2A27;
+      --border: #26363A;
+      --border-strong: #35494E;
+      --text-primary: #EDEDE8;
+      --text-secondary: #9AA6A3;
+      --text-muted: #6C7876;
+      --accent-teal: #2FBF9A;
+      --accent-teal-dim: #1F8A6E;
+      --accent-amber: #F0AC2E;
+      --accent-coral: #E8752E;
+      --accent-pink: #C93C7A;
+      --text-danger: #FF6B6B;
+      --radius: 10px;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { background: var(--bg); }
+    body {
+      background:
+        radial-gradient(circle at -5% -10%, rgba(47,191,154,0.16), transparent 32%),
+        radial-gradient(circle at 105% -10%, rgba(240,172,46,0.14), transparent 32%),
+        radial-gradient(circle at -5% 110%, rgba(55,138,221,0.14), transparent 32%),
+        radial-gradient(circle at 105% 110%, rgba(201,60,122,0.16), transparent 32%),
+        var(--bg);
+      background-attachment: fixed;
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      margin: 0 auto;
+      padding: 32px 24px 64px;
+      line-height: 1.5;
+      max-width: 720px;
+    }
+
+    /* Phase 10c: brand header now uses the actual logo asset (mumblew_logo.png,
+       background-removed from the student's source file) rather than a
+       CSS-generated wordmark — see .brand below. */
+    .brand { margin-bottom: 4px; }
+
+    .intro-text {
+      color: var(--text-secondary);
+      font-size: 14px;
+      max-width: 640px;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--panel-accent, var(--border-strong));
+      border-radius: var(--radius);
+      padding: 16px;
+    }
+    #calibrationPanel { --panel-accent: var(--accent-teal); }
+    #textInputPanel { --panel-accent: var(--accent-amber); }
+    #debugPanel { --panel-accent: var(--accent-pink); }
+
+    button {
+      background: var(--surface-raised);
+      color: var(--text-primary);
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 14px;
+      font-family: inherit;
+      cursor: pointer;
+      transition: border-color 150ms ease, background 150ms ease;
+    }
+    button:hover:not(:disabled) { border-color: var(--accent-teal); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    #calibrateBtn:hover:not(:disabled) { border-color: var(--accent-amber); }
+    #loadTextBtn:hover:not(:disabled) { border-color: var(--accent-coral); }
+    input[type="checkbox"] { accent-color: var(--accent-pink); }
+    #startBtn:not(:disabled) {
+      background: var(--accent-teal-dim);
+      border-color: var(--accent-teal);
+      color: #06110D;
+      font-weight: 600;
+    }
+
+    label { color: var(--text-primary); font-size: 14px; }
+
+    textarea, input[type="file"] {
+      background: var(--surface-raised);
+      color: var(--text-primary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-family: inherit;
+    }
+    textarea { padding: 10px; }
+    textarea::placeholder { color: var(--text-muted); }
+    textarea:focus, input:focus { outline: 2px solid var(--accent-teal); outline-offset: 1px; }
+
+    #container {
+      position: relative;
+      width: 640px;
+      height: 480px;
+      border: 2px solid transparent;
+      border-radius: var(--radius);
+      overflow: hidden;
+      background:
+        linear-gradient(var(--bg), var(--bg)) padding-box,
+        linear-gradient(120deg, var(--accent-teal), #378ADD 35%, var(--accent-amber) 60%, var(--accent-coral) 80%, var(--accent-pink)) border-box;
+      transition: width 150ms ease, height 150ms ease;
+    }
+    /* Phase 10c: webcam/mesh hidden by default, shown only while the
+       calibration wizard is active (toggled via JS, see main.js). Kept in
+       the DOM and still processed by MediaPipe underneath — this is a
+       visibility-only change, not a functional one. Uses opacity + a
+       collapsed 1px box rather than display:none, since display:none risks
+       some browsers pausing frame delivery on a hidden <video>. */
+    #container.video-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+      overflow: hidden;
+      border: none;
+    }
     #webcam, #overlay {
       position: absolute;
       top: 0;
@@ -27,84 +156,156 @@
       padding: 10px;
       border-radius: 6px;
       border: 4px solid transparent;
+      background: var(--surface);
       transition: border-color 200ms ease-out;
     }
     /* Separate fast/sharp cue (Entry 17 Q2) for hard failures — a stuck word
        or a head-pose gate trip — layered on TOP of the slow ambient drift via
        box-shadow rather than replacing it, so the two channels don't fight or
-       get confused as the same signal. */
+       get confused as the same signal. Brightened from the original
+       rgba(180,0,0,*) so it still reads clearly against the dark surface —
+       same signal, same timing, just recalibrated for contrast, not redesigned. */
     #readingPane.trouble-pulse {
       animation: troublePulse 260ms ease-out;
     }
     @keyframes troublePulse {
-      0%   { box-shadow: 0 0 0 0 rgba(180, 0, 0, 0); }
-      30%  { box-shadow: 0 0 0 7px rgba(180, 0, 0, 0.4); }
-      100% { box-shadow: 0 0 0 0 rgba(180, 0, 0, 0); }
+      0%   { box-shadow: 0 0 0 0 rgba(255, 90, 90, 0); }
+      30%  { box-shadow: 0 0 0 7px rgba(255, 90, 90, 0.45); }
+      100% { box-shadow: 0 0 0 0 rgba(255, 90, 90, 0); }
     }
     #readingText {
       font-size: 20px;
       line-height: 1.6;
+      color: var(--text-primary);
     }
     #readingText .word {
       cursor: pointer;
       border-radius: 3px;
     }
     #readingText .word:hover {
-      background-color: #eeeeee;
+      background-color: var(--surface-raised);
     }
     #readingText .word.active {
-      background-color: #ffe066;
+      background-color: var(--accent-amber);
+      color: #2A1B04;
+    }
+    #debugPanel summary {
+      cursor: pointer;
+      font-weight: 600;
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      list-style: none;
+    }
+    #debugPanel summary::-webkit-details-marker { display: none; }
+    #debugPanel summary::before {
+      content: "▸";
+      display: inline-block;
+      margin-right: 6px;
+      color: var(--accent-pink);
+      transition: transform 150ms ease;
+    }
+    #debugPanel[open] summary::before { transform: rotate(90deg); }
+    #debugPanel .debug-body { margin-top: 10px; }
+    /* Phase 10c step 5: light, restrained animation — CSS transitions/
+       keyframes only, no JS/canvas, so it doesn't add to the live
+       MediaPipe loop's cost. Deliberately kept separate in *purpose* from
+       the app's functional motion (trouble-border drift/pulse, per-word
+       highlight): those signal something changing in the reading session
+       and must stay instant/legible; this is just polish, so it uses only
+       teal/neutral tones (never red, never touches .word.active) and stays
+       subtle enough not to compete for attention. Respects
+       prefers-reduced-motion since a webcam-driven app already has a lot
+       of on-screen motion by nature (mesh dots, highlight, trouble drift). */
+    @media (prefers-reduced-motion: no-preference) {
+      @keyframes fadeInUp {
+        from { opacity: 0; transform: translateY(6px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+      .brand, .intro-text, #controls, .panel, #readingPane {
+        animation: fadeInUp 420ms ease-out both;
+      }
+      .brand { animation-delay: 0ms; }
+      #controls { animation-delay: 60ms; }
+      #calibrationPanel { animation-delay: 90ms; }
+      #textInputPanel { animation-delay: 90ms; }
+      #readingPane { animation-delay: 120ms; }
+      #debugPanel { animation-delay: 150ms; }
+
+      button { transition: border-color 150ms ease, background 150ms ease, transform 150ms ease; }
+      button:hover:not(:disabled) { transform: translateY(-1px); }
+
+      /* A gentle breathing glow on Start Reading once text is loaded and
+         it's actually clickable — an invitation, not an alert (that's what
+         the red trouble-pulse is for), so it stays slow and low-amplitude. */
+      @keyframes readyGlow {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(47, 191, 154, 0); }
+        50%      { box-shadow: 0 0 10px 1px rgba(47, 191, 154, 0.35); }
+      }
+      #startBtn:not(:disabled) { animation: readyGlow 2.6s ease-in-out infinite; }
+
+      /* Slow shimmer on the webcam frame's gradient border, only while it's
+         actually visible (during calibration) — echoes the logo's wave
+         motif without costing anything while hidden the rest of the time. */
+      @keyframes borderShimmer { to { background-position: 0 0, 200% 0; } }
+      #container:not(.video-hidden) {
+        background-size: 200% 100%, 200% 100%;
+        animation: borderShimmer 6s linear infinite;
+      }
     }
   </style>
 </head>
 <body>
-  <h1>Face Mesh Test</h1>
-  <p>You should see dots tracking your face, especially around your mouth.</p>
-  <p id="privacyNote" style="font-size: 13px; color: #555; max-width: 640px;">
-    🔒 Your camera video is processed entirely on your device and is never uploaded,
+  <div class="brand">
+    <img src="mumblew_logo.png" alt="Mumblew — silent read-along" style="height: 96px; width: auto; display: block;">
+  </div>
+  <p class="intro-text">Mouth along with the text below — Mumblew reads it aloud at your pace, no buttons or timers needed.</p>
+  <p id="privacyNote" class="intro-text">
+    Your camera video is processed entirely on your device and is never uploaded,
     recorded, or sent anywhere. You can verify this yourself in your browser's
     DevTools → Network tab.
   </p>
 
-  <div id="container">
+  <div id="container" class="video-hidden">
     <video id="webcam" autoplay playsinline muted></video>
     <canvas id="overlay"></canvas>
   </div>
+  <p class="intro-text" style="margin-top: 6px; font-size: 12px;">Camera preview appears only during calibration — hidden the rest of the time.</p>
 
-  <div id="controls" style="margin-top: 10px;">
+  <div id="controls" style="margin-top: 12px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
     <button id="startBtn" disabled>Start Reading</button>
     <button id="calibrateBtn">Calibrate</button>
-    <label style="margin-left: 12px;">
+    <label style="display: flex; align-items: center; gap: 6px;">
       <input type="checkbox" id="toneToggle">
       Emotional tone (experimental)
     </label>
   </div>
 
-  <div id="calibrationPanel" style="display:none; margin-top: 10px; padding: 12px; border: 1px solid #ccc; max-width: 640px; background: #fafafa;">
-    <div id="calibrationStep" style="font-weight: bold;"></div>
-    <div id="calibrationInstruction" style="margin-top: 6px;"></div>
+  <div id="calibrationPanel" class="panel" style="display:none; margin-top: 10px; max-width: 640px;">
+    <div id="calibrationStep" style="font-weight: 600;"></div>
+    <div id="calibrationInstruction" style="margin-top: 6px; color: var(--text-secondary);"></div>
     <div id="calibrationCountdown" style="margin-top: 6px; font-family: monospace;"></div>
-    <div id="calibrationMessage" style="margin-top: 6px; color: #b00020;"></div>
+    <div id="calibrationMessage" style="margin-top: 6px; color: var(--text-danger);"></div>
     <button id="calibrationCancelBtn" style="margin-top: 8px;">Cancel</button>
     <button id="calibrationRetryBtn" style="margin-top: 8px; display:none;">Retry</button>
   </div>
 
-  <!-- Phase 10a: text input. Functional only (no styling pass — that's 10c).
-       The textarea is the single source of truth: type/paste directly into
-       it to test the app without any file, OR pick a .txt file to load its
-       contents into the box, then click "Load Text" either way. Keeping one
-       load action for both paths avoids two divergent code paths and lets
-       the student review/edit an uploaded file's text before committing it. -->
-  <div id="textInputPanel" style="margin-top: 10px; padding: 12px; border: 1px solid #ccc; max-width: 640px; background: #fafafa;">
-    <div style="font-weight: bold;">Reading text</div>
+  <!-- Phase 10a: text input, themed as of Phase 10c. The textarea is the
+       single source of truth: type/paste directly into it to test the app
+       without any file, OR pick a .txt file to load its contents into the
+       box, then click "Load Text" either way. Keeping one load action for
+       both paths avoids two divergent code paths and lets the student
+       review/edit an uploaded file's text before committing it. -->
+  <div id="textInputPanel" class="panel" style="margin-top: 10px; max-width: 640px;">
+    <div style="font-weight: 600;">Reading text</div>
     <textarea id="textInputArea" rows="6"
-      style="width: 100%; margin-top: 6px; font-family: inherit; font-size: 14px; box-sizing: border-box;"
+      style="width: 100%; margin-top: 6px; font-size: 14px;"
       placeholder="Type or paste text here to test the app, or upload a .txt file below..."></textarea>
-    <div style="margin-top: 6px;">
+    <div style="margin-top: 6px; display: flex; align-items: center; gap: 8px;">
       <input type="file" id="txtFileInput" accept=".txt">
-      <button id="loadTextBtn" style="margin-left: 8px;">Load Text</button>
+      <button id="loadTextBtn">Load Text</button>
     </div>
-    <div id="textLoadStatus" style="margin-top: 6px; font-size: 13px; color: #555;">
+    <div id="textLoadStatus" class="intro-text" style="margin-top: 6px;">
       No text loaded yet — type/paste above or upload a .txt file, then click Load Text.
     </div>
   </div>
@@ -113,25 +314,28 @@
     <div id="readingText"></div>
   </div>
 
-  <div id="debug" style="margin-top: 10px; font-family: monospace; font-size: 16px;">
-    <div>MAR: <span id="marValue">-</span></div>
-    <div>Mouth state: <span id="mouthState">-</span></div>
-    <div>Speech state: <span id="speechState">-</span></div>
-    <div>Yaw: <span id="yawValue">-</span>&deg;</div>
-    <div>Pitch: <span id="pitchValue">-</span>&deg;</div>
-    <div>Head pose: <span id="facingState">facing screen</span></div>
-    <div>Movement range: <span id="movementRangeValue">-</span></div>
-    <div>Cadence (elapsed/expected): <span id="cadenceValue">-</span></div>
-    <div>Calibration: <span id="calibrationStatusValue">using default thresholds</span></div>
-    <div>Speed calibration: <span id="speedCalibrationValue">using default pacing (calibrate to personalize)</span></div>
-    <div>Tone: <span id="toneValue">off</span></div>
-    <div>Trouble score: <span id="troubleValue">0.00</span></div>
-    <div>Word boundary events (this utterance): <span id="boundaryCountValue">0</span></div>
-    <div>Last onboundary: <span id="lastBoundaryAgoValue">-</span>ms ago</div>
-    <div>Speed fit (raw): <span id="rateFitDebugValue">-</span></div>
-    <div>Detection gap (last close): <span id="detectionGapValue">-</span></div>
-    <div>Cancel-to-actual-stop gap (last close): <span id="cancelStopGapValue">-</span></div>
-  </div>
+  <details id="debugPanel" class="panel" style="margin-top: 10px; max-width: 640px;">
+    <summary>Debug panel</summary>
+    <div class="debug-body" style="font-family: monospace; font-size: 14px; color: var(--text-secondary);">
+      <div>MAR: <span id="marValue">-</span></div>
+      <div>Mouth state: <span id="mouthState">-</span></div>
+      <div>Speech state: <span id="speechState">-</span></div>
+      <div>Yaw: <span id="yawValue">-</span>&deg;</div>
+      <div>Pitch: <span id="pitchValue">-</span>&deg;</div>
+      <div>Head pose: <span id="facingState">facing screen</span></div>
+      <div>Movement range: <span id="movementRangeValue">-</span></div>
+      <div>Cadence (elapsed/expected): <span id="cadenceValue">-</span></div>
+      <div>Calibration: <span id="calibrationStatusValue">using default thresholds</span></div>
+      <div>Speed calibration: <span id="speedCalibrationValue">using default pacing (calibrate to personalize)</span></div>
+      <div>Tone: <span id="toneValue">off</span></div>
+      <div>Trouble score: <span id="troubleValue">0.00</span></div>
+      <div>Word boundary events (this utterance): <span id="boundaryCountValue">0</span></div>
+      <div>Last onboundary: <span id="lastBoundaryAgoValue">-</span>ms ago</div>
+      <div>Speed fit (raw): <span id="rateFitDebugValue">-</span></div>
+      <div>Detection gap (last close): <span id="detectionGapValue">-</span></div>
+      <div>Cancel-to-actual-stop gap (last close): <span id="cancelStopGapValue">-</span></div>
+    </div>
+  </details>
 
   <script type="module" src="main.js"></script>
 

@@ -1,5 +1,5 @@
-# PROGRESS LOG — "Reading App" (working title)
-Last updated: July 24, 2026 (Entry 25)
+# PROGRESS LOG — "Mumblew" (reading app)
+Last updated: July 24, 2026 (Entry 28)
 
 > HOW TO USE: Single source of truth. Claude reads this first in every new chat.
 > Update before ending each session. If Claude contradicts this file, trust this file.
@@ -13,6 +13,8 @@ Last updated: July 24, 2026 (Entry 25)
 ---
 
 ## 1. The Idea (Owner: student)
+
+**Name: Mumblew** (Entry 27). Student has a logo already.
 
 Privacy-first app: reads/listens to text using quiet mouth movement (subvocalization)
 as the pacing signal, narrating via TTS driven by webcam lip-tracking instead of
@@ -127,7 +129,7 @@ a design gap.
     use case) shifts the face's position in-frame in a way that seems to affect
     yaw/pitch beyond genuine head-angle change — student had real difficulty
     registering "facing screen" while lying down. Not yet root-caused. May connect
-    conceptually to Phase 12 (recalibration robustness), which is about distance
+    conceptually to Phase 13 (recalibration robustness), which is about distance
     drift rather than off-axis position — worth checking whether it's the same
     underlying gap once investigated. **Set aside alongside 9a for now (Entry 24)
     — not pursuing mobile/pose-edge-case work further right now.**
@@ -147,6 +149,24 @@ a design gap.
   MAX_BASE_WORD_MS=800`; confirmed fixed via a clean recalibration
   (`final rate=1.024`). Multiplies with the Phase 8a tone-toggle rate when tone is
   on. **Closed, no open flags.**
+  **New gap found Entry 26, not yet fixed — scoped as Phase 12a:**
+  `estimateSyllables()` strips everything outside `[a-z]` before counting vowel
+  clusters. Two consequences, both invisible under the old fixed `READING_TEXT`
+  (which had neither) and now real now that Phase 10a allows arbitrary text:
+  - **Numbers undercounted:** `"1999,"` → 1 syllable, but Web Speech will actually
+    speak it as "nineteen ninety-nine" (far more syllables) — cadence pacing runs
+    ahead of the real spoken duration on any numeric-heavy text (dates, prices,
+    addresses).
+  - **Accented/non-English words unreliable:** `"café"` → 1, `"naïve"` → 1 (should
+    be ~2), `"jalapeño"` → 3 — accent-stripping wasn't designed with loanwords in
+    mind.
+  Confirmed via a scripted test pass (Entry 26) against a battery of arbitrary text
+  (whitespace/newlines, curly quotes, em-dashes, hyphenation, ALL CAPS, a 20k-word
+  stress test) — word-splitting itself held up cleanly (no crashes, no zero-length
+  spans) and all previously-tuned silent-e regression cases still pass; only the
+  syllable-counting rules for digits/accents need extending. Deterministic fix,
+  no `speechSynthesis` involved — low risk, doesn't need its own dedicated session
+  the way 9a/12b do.
 - **Movement-range smoothing (Phase 6a):** `WINDOW_MS=300`. Confirmed still working
   correctly on mobile (Entry 23 diagnostics) — not implicated in the overshoot bug.
 - **Calibration mode (Phase 7b):** 4-step wizard (neutral → mutter → facing →
@@ -159,6 +179,24 @@ a design gap.
   (wedged Chrome's speech engine both times, same bug *class* as the Edge freeze,
   and the same bug class Phase 9a hit a third time via a disguised chain — Entry
   24).
+  **Robotic-voice problem surfaced Entry 26, scoped as Phase 12b (not yet
+  started):** the tone toggle exists but wasn't enough to fix perceived voice
+  quality — with real (non-test-paragraph) text now loading via Phase 10a, the
+  default Web Speech browser voice reads as noticeably flat/robotic. Root cause is
+  the browser's default voice's prosody itself, not something Phase 8a's
+  punctuation heuristic was ever going to solve on its own. **Deliberately NOT
+  bundled with Phase 12a (duration estimation)** even though both surfaced in the
+  same session — 12a is a pure, deterministic string-logic fix; this one requires
+  listening/tuning against the live `speechSynthesis` engine, the same subsystem
+  that has already caused two confirmed freezes (Entry 16, Entry 24). Gets the
+  same caution and its own dedicated session as 9a, not folded into a "fix voice
+  stuff" grab-bag. Candidate directions to evaluate when this phase starts (not
+  decided yet): trying alternate installed voices via `speechSynthesis.getVoices()`
+  (quality varies a lot browser/OS-to-browser/OS, still $0), revisiting whether a
+  non-chaining variant of per-sentence tone application is possible now that Phase
+  9a's root cause (call-frequency ceiling, not chaining specifically) is better
+  understood, or accepting current voice quality as a platform limitation the same
+  way 9a's ceiling was accepted.
 - **Explicitly rejected, not deferred:** mic-based audible-speech safeguard (dead
   weight for the ALS/paralysis audience, new permission prompt); ROI cropping
   (recalibration risk not worth the battery gain vs. dynamic frame rate); per-
@@ -166,16 +204,44 @@ a design gap.
   Entry 24 — not rejected by design choice, but by a confirmed platform ceiling;
   see above, may be revisited with a different mechanism)**.
 - **Phase 7c:** dynamic frame rate, `IDLE_FRAME_INTERVAL_MS=100`.
+- **Text input (Phase 10a) — shipped, deployed to Vercel, Entry 26.**
+  `READING_TEXT` (hardcoded const) replaced with `currentText` (mutable, starts
+  `null`). Textarea is the single source of truth for both manual typing/testing
+  and `.txt` uploads — a file's contents load into the box rather than bypassing
+  it, so one "Load Text" action handles both paths and the student can review/edit
+  an uploaded file before committing it. `hasLoadedText()` gates Start Reading
+  everywhere it's re-enabled (including all three calibration-flow exit points,
+  which previously unconditionally re-enabled it) via a shared
+  `updateStartButtonState()`. Loading new text hard-stops any in-progress session
+  first (`cancel()` + flag reset, same pattern already used elsewhere) before
+  rebuilding word spans, so `baseOffset`/`wordSpans` can never end up pointing at
+  stale text. Persisted to `localStorage` (`readingAppText`, same pattern as
+  `readingAppCalibration`) and auto-restored on load. Old fixed test paragraph
+  kept only as a textarea *prefill* (not baked into `currentText`), so one-click
+  quick testing still works without typing anything. Test pass against arbitrary
+  text (see cadence entry above) confirmed word-splitting itself is solid; the
+  numbers/accents gap that pass surfaced became Phase 12a.
+- **Webcam/mesh visibility during reading (Entry 27, decided as part of scoping
+  10c, not yet built):** the live webcam feed + mesh overlay will be hidden by
+  default while actually reading — visible only during the calibration wizard,
+  where the student needs to see themselves to position correctly. Rationale:
+  Mumblew's actual audience (reading in bed/dark, low-focus readers, ALS/paralysis
+  users) has no reason to want to watch their own face on a green mesh while
+  trying to read or fall asleep; it belongs to the "test harness" phase of the
+  project, not the product. Tracking/MediaPipe processing keeps running underneath
+  regardless (the mouth/pose signal still needs it) — this is a *rendering* choice
+  only, not a functional one. Folded into Phase 10c rather than treated as a
+  separate mobile-layout fix (see Phase 10 entry below for why 10b was dropped as
+  a standalone phase).
 
 ### 3b. Scope decisions
 
 - Platform: Web app, Chrome-first. Cross-browser support not a priority pre-demo.
-- Text input still hardcoded (`READING_TEXT` in `main.js`) — Phase 10.
 - Security: `textContent` never `innerHTML` (XSS guard), pinned CDN versions, CSP
   header, camera-privacy disclosure, HTTPS via Vercel. Full review deferred to
-  Phase 13 (after file upload in Phase 10 actually expands the attack surface).
+  Phase 14 (after file upload in Phase 10 actually expands the attack surface).
 
-### 3c. Phases 9-14 (scoped Entry 14/15, revised Entry 22-24)
+### 3c. Phases 9-15 (scoped Entry 14/15, revised Entry 22-27)
 
 - **Phase 9 — Mobile bug fixes**, split as issues were found live-testing (Entry
   22-23):
@@ -189,52 +255,79 @@ a design gap.
     mobile-exclusive; benefits both platforms. See Section 3.
   - **9c — Off-axis/lying-down pose calibration.** Not yet root-caused. Set aside
     for now alongside 9a/mobile-specific work (Entry 24 decision).
-- **Phase 10 — UI redesign + text input.** Scoped into three sub-phases (Entry
-  25), self-contained — doesn't touch the fragile speech or pose subsystems at
-  all. **Build order: 10a → 10b → 10c** (student-confirmed, Entry 25) — text
-  input first so the real UI elements (textarea, upload control) already exist
-  before the visual redesign pass, rather than redesigning around a
-  placeholder and redoing it.
-  - **10a — Text input:** paste box + `.txt` upload, wired to replace the
-    hardcoded `READING_TEXT` const. Once text is dynamic,
-    `estimateSyllables`/silent-e handling and `buildWordSpans` need a real
-    test pass against arbitrary pasted text, not just the one hand-tuned
-    `READING_TEXT`.
-  - **10b — Portrait/vertical mobile layout fix:** `#container`/`#webcam`/
-    `#overlay` are hardcoded to 640×480, stretching a portrait camera stream.
-    Pure CSS/canvas-sizing fix, no speech/pose code touched — still fine to do
-    despite mobile-specific work (9a/9c) being otherwise paused, per the same
-    reasoning as Entry 24. Standard cross-device check applies: must not
-    regress the working laptop 640×480 layout.
-  - **10c — Full visual redesign:** explicitly scoped (Entry 25) as a real
-    product pass, not just functional additions — this is the point the
-    project shifts from "test harness" toward "usable by its actual
-    audience." Covers styling across the whole page: controls, calibration
-    panel, reading pane, privacy note — plus making the debug panel
-    **collapsible/toggleable, hidden by default** (Entry 25 decision) rather
-    than deleted or left as-is; the diagnostic readouts in it (Entry 22-23)
-    still need to stay reachable for a future 9a attempt, they just shouldn't
-    be front-and-center for a real reader.
+- **Phase 10 — UI redesign + text input.** Now three sub-phases (revised Entry
+  27 — was four; 10b dropped, see below). Self-contained — doesn't touch the
+  fragile speech or pose subsystems at all. **Build order: 10a → 10c → 10d.**
+  - **10a — Text input. Shipped, deployed to Vercel — Entry 26.** Paste/type +
+    `.txt` upload, wired to replace the hardcoded `READING_TEXT`. Test pass done
+    (see Section 3). Surfaced two follow-on issues, deliberately spun out rather
+    than fixed inline: duration-estimation gaps on numbers/foreign words (→ Phase
+    12a) and a robotic-voice-quality concern (→ Phase 12b, unrelated root cause,
+    kept separate).
+  - ~~**10b — Portrait/vertical mobile layout fix.**~~ **Dropped as a standalone
+    phase (Entry 27).** Originally scoped to fix the hardcoded 640×480
+    `#container`/`#webcam`/`#overlay` stretching a portrait phone camera stream.
+    Reconsidered once the student pointed out (1) mobile-specific work is
+    already paused (9a/9c) and (2) more fundamentally, 10c is going to hide the
+    webcam/mesh view during actual reading anyway (see Section 3) — so a
+    general-purpose portrait fix for a view most readers won't be looking at
+    during reading was solving the wrong scope. What actually still needs
+    portrait handling is much narrower: just the **calibration view**, where the
+    video is genuinely shown. That's a small piece of layout work, folded into
+    10c and designed once alongside the webcam-visibility decision, rather than
+    patched separately beforehand and possibly thrown away once 10c changes when
+    the video is even shown.
+  - **10c — Full visual redesign. Shipped, Entry 28. No open flags.** Logo
+    integrated (`mumblew_logo.png` — background removed from student's source
+    file, cropped clear of corner decoration). Dark palette (teal/blue/gold/
+    coral/pink accents on a near-black teal-tinted bg) themed site-wide via CSS
+    vars. Webcam/mesh hidden by default (`.video-hidden` class: opacity+1px
+    box, not `display:none`, so MediaPipe keeps reading frames underneath —
+    resolves Entry 27's open question), shown only during calibration
+    (`setCalibrationVideoVisible()`, toggled at calibration start/cancel/
+    finish, but *not* on failure so the retry view stays visible). Former 10b's
+    portrait fix folded in as `updateVideoBoxSize()` — sizes the calibration
+    video box to the real stream's aspect ratio instead of a hardcoded 640x480.
+    Debug panel converted to a native `<details>`, closed by default, no JS
+    needed. Light CSS-only animation last (entrance fades, button hover,
+    Start-Reading ready-glow, border shimmer) — all teal/neutral, never red,
+    never touches `.word.active`, wrapped in `prefers-reduced-motion`.
   - **10d — `.pdf` upload:** full PDF text-extraction support, split out as
     its own sub-phase rather than deferred/cut (Entry 25 correction — student
     wants this feature, just isolated since it's the one piece with real
     added complexity). Needs `pdf.js` as a new CDN dependency (same pattern as
     MediaPipe — loaded from jsdelivr) plus a `vercel.json` CSP update
-    (`script-src`/`connect-src`) to allow it. Comes after 10a-10c so the
+    (`script-src`/`connect-src`) to allow it. Comes after 10a/10c so the
     simpler text-input paths (paste/`.txt`) and the redesigned UI they live in
     are solid first; the PDF upload control's placement/styling in 10c should
-    still leave room for it to slot in without another layout pass.
+    still leave room for it to slot in without another layout pass. Once 10d
+    ships, revisit whether `localStorage` is still the right persistence layer
+    for Phase 10a's saved text — PDF-extracted text can get much larger than
+    typed/pasted text, and IndexedDB (considered and deliberately deferred at
+    10a, Entry 26) may be worth it then, not before.
 - **Phase 11 — Personalized speed calibration.** Shipped Entry 18, clamp bug fixed
   Entry 23. Closed, no open flags.
 - **Phase 11b — Ambient trouble-shading.** Shipped Entry 19-21. Mobile
   blinking symptom traced to the same root cause as 9a — still open on mobile
   since 9a is shelved, not separate work.
-- **Phase 12 — Distance/recalibration robustness.** Not started. May turn out
-  related to Phase 9c.
-- **Phase 13 — Full security review** (after Phase 10).
-- **Phase 14 — Shipping prep + paywall.** Ethical flag to revisit then: target
-  audience includes ALS/paralysis users — a paywall by default deserves a
-  deliberate decision, not a default.
+- **Phase 12a — Duration estimation accuracy (new, Entry 26). Not started.**
+  Extend `estimateSyllables()` to handle numbers (digit-aware syllable
+  approximation) and accented/non-English characters, surfaced by Phase 10a's
+  test pass. Deterministic, no `speechSynthesis` involved — low risk, doesn't
+  need a dedicated session the way 12b does. See Section 3 for full detail.
+- **Phase 12b — Voice quality / robotic tone (new, Entry 26). Not started.**
+  Address the flat/robotic default Web Speech voice, surfaced once real text
+  (rather than the old test paragraph) started going through the app. Touches the
+  live `speechSynthesis` engine — same caution and dedicated-session treatment as
+  9a, deliberately not bundled with 12a. Candidate directions listed in Section 3,
+  none decided yet.
+- **Phase 13 — Distance/recalibration robustness** (renumbered from 12, Entry 26).
+  Not started. May turn out related to Phase 9c.
+- **Phase 14 — Full security review** (renumbered from 13, Entry 26; after Phase
+  10).
+- **Phase 15 — Shipping prep + paywall** (renumbered from 14, Entry 26). Ethical
+  flag to revisit then: target audience includes ALS/paralysis users — a paywall
+  by default deserves a deliberate decision, not a default.
 
 ## 4. Roadmap
 
@@ -252,39 +345,52 @@ a design gap.
       No open flags.
 - [ ] **Phase 9c:** Off-axis/lying-down pose calibration — not yet root-caused.
       Set aside alongside 9a for now.
-- [ ] **Phase 10:** UI redesign + text input. Split into 10a/10b/10c (Entry 25),
-      build order confirmed. **Next up: 10a.**
-  - [ ] **10a:** Text input (paste + `.txt`).
-  - [ ] **10b:** Portrait/vertical mobile layout fix (640×480 hardcoding).
-  - [ ] **10c:** Full visual redesign, incl. collapsible/hidden-by-default
-        debug panel.
+- [ ] **Phase 10:** UI redesign + text input. Three sub-phases (revised Entry
+      27): 10a / 10c / 10d. Build order: 10a → 10c → 10d.
+  - [x] **10a:** Text input (paste + `.txt`) — shipped, deployed to Vercel
+        (Entry 26). Surfaced Phase 12a/12b as follow-on work.
+  - ~~**10b:** Portrait/vertical mobile layout fix~~ — dropped as a standalone
+        phase (Entry 27); the narrow piece still needed (calibration-view
+        portrait handling) folded into 10c.
+  - [x] **10c:** Full visual redesign — shipped, Entry 28. No open flags.
   - [ ] **10d:** `.pdf` upload (needs `pdf.js` + CSP update) — not deferred,
-        own sub-phase.
+        own sub-phase. Also the point to revisit `localStorage` vs IndexedDB
+        for saved text. **Next up.**
 - [x] **Phase 11:** Personalized speed calibration — shipped, clamp bug fixed
       Entry 23. No open flags.
 - [x] **Phase 11b:** Ambient trouble-shading — shipped; mobile blinking is a 9a
       symptom, still open since 9a is shelved.
-- [ ] **Phase 12:** Distance / recalibration robustness.
-- [ ] **Phase 13:** Full security review pass (after Phase 10).
-- [ ] **Phase 14:** Shipping prep + paywall.
+- [ ] **Phase 12a:** Duration estimation accuracy (numbers, foreign words) — new,
+      Entry 26. Not started. Low-risk, deterministic fix.
+- [ ] **Phase 12b:** Voice quality / robotic tone — new, Entry 26. Not started.
+      Touches live speech engine — needs its own dedicated session, like 9a.
+- [ ] **Phase 13:** Distance / recalibration robustness (renumbered from 12).
+- [ ] **Phase 14:** Full security review pass (renumbered from 13; after Phase 10).
+- [ ] **Phase 15:** Shipping prep + paywall (renumbered from 14).
 
 ## 5. Current status
 
-Project folder `reading-app`: `index.html` + `main.js`, deployed to Vercel. Phases
-0-8a complete and deployed. Phase 11/11b shipped (11b has an open mobile symptom,
-tied to shelved 9a).
+Project folder `reading-app` (app name: **Mumblew**): `index.html` + `main.js`,
+deployed to Vercel. Phases 0-8a complete and deployed. Phase 11/11b shipped (11b
+has an open mobile symptom, tied to shelved 9a). Phase 10a shipped and deployed to
+Vercel (Entry 26) — student tested locally and confirmed live.
 
-**Mobile-specific work is paused (Entry 24).** 9b (no-face-detected safety gap,
-not actually mobile-exclusive) is fixed, tested, and closed. 9a was attempted,
-caused a worse regression than the bug it targeted (a genuine Chromium
-speech-engine freeze, reproduced on desktop), and was fully reverted — shelved as
-an unsolved platform ceiling rather than a quick fix. 9c (lying-down pose) remains
-unexplained. **Decision: don't chase 9a/9c further right now — move to Phase 10
-next**, which is self-contained (UI redesign + text input) and doesn't touch the
-fragile speech or pose subsystems at all.
+**Mobile-specific work remains paused (Entry 24).** 9b is fixed/closed. 9a was
+attempted, caused a worse regression than the bug it targeted, and was fully
+reverted — shelved as an unsolved platform ceiling. 9c (lying-down pose) remains
+unexplained. Not being chased right now.
 
-`main.js` is currently byte-for-byte the pre-9a version plus the 9b addition only
-— confirmed stable.
+**Phase 10c shipped (Entry 28)** — see Section 3 for full detail. `index.html`/
+`main.js` now include the dark theme, logo, webcam-hidden-by-default behavior,
+collapsible debug panel, and light animation, on top of Phase 10a's text input.
+Project now has a third asset: `mumblew_logo.png` (transparent, dark-mode ready)
+sits alongside `index.html`/`main.js`.
+
+**Phases 12a/12b (Entry 26) remain not-yet-started, unaffected by 10c:**
+duration-estimation gaps (numbers/accented words) and robotic default-voice
+quality — see Section 3 for detail on each.
+
+**Next up: Phase 10d** (`.pdf` upload).
 
 Temporary diagnostics still live in the debug panel from the Entry 22-23
 mobile-testing effort (boundary event counter, last-onboundary timer, speed-fit
@@ -349,3 +455,50 @@ Key technical values/constants are all in Section 3 — not duplicated here.
   debug panel gets made collapsible/toggleable, hidden by default, in 10c
   rather than removed — its diagnostics still need to stay reachable for a
   future 9a attempt. Next session starts 10a.
+- **Entry 26 (Jul 24):** Built and shipped Phase 10a. Replaced hardcoded
+  `READING_TEXT` with mutable `currentText`; added paste/type textarea +
+  `.txt` upload sharing one "Load Text" action; gated Start Reading behind
+  `hasLoadedText()` everywhere it's re-enabled (including all three
+  calibration-flow exit points); new text hard-stops any active session
+  before rebuilding word spans; persisted to `localStorage`
+  (`readingAppText`, same pattern as calibration) with auto-restore on load;
+  old test paragraph kept only as a textarea prefill. Chose `localStorage`
+  over IndexedDB for now (typed/pasted/`.txt` text is small; revisit once
+  10d's PDF text can get large). Ran a scripted test pass against arbitrary
+  text (whitespace, curly quotes, em-dashes, hyphenation, ALL CAPS, a
+  20k-word stress test, full silent-e regression check) — word-splitting
+  held up cleanly; surfaced a real gap in `estimateSyllables()` on numbers
+  and accented/foreign words, invisible under the old fixed test paragraph.
+  Student tested locally and deployed to Vercel; confirmed live. Student
+  then flagged the default Web Speech voice sounds noticeably more robotic
+  on real text than it did on the old test paragraph. Discussed and split
+  the two newly-surfaced issues into separate phases rather than one bundled
+  fix: **Phase 12a** (duration estimation on numbers/foreign words —
+  deterministic, low-risk) and **Phase 12b** (voice quality/robotic tone —
+  touches the live `speechSynthesis` engine, gets 9a-style dedicated-session
+  caution, candidate directions listed but nothing decided). Inserted both
+  before the old Phase 12, renumbering it and everything after
+  (12→13 distance/recalibration, 13→14 security, 14→15 shipping/paywall).
+  Phase 10's own build order (10a→10b→10c→10d) unaffected. Next up: 10b.
+- **Entry 27 (Jul 24):** Scoping discussion only, no code changed. Student
+  questioned whether standalone Phase 10b still made sense, given mobile
+  work is paused and — more importantly — 10c will hide the webcam/mesh view
+  during actual reading, making a general portrait layout fix for that view
+  largely moot. Agreed: dropped 10b as a standalone phase; folded its one
+  still-relevant piece (portrait handling for the calibration view, where
+  video is genuinely shown) into 10c. Clarified and expanded 10c's scope in
+  detail: branding foundation first (app name **Mumblew** confirmed, student
+  has a logo already), then theme applied site-wide, then the
+  webcam/mesh-hidden-during-reading change (with calibration-view portrait
+  handling folded in here), then the existing collapsible-debug-panel plan,
+  then light/restrained animation last — kept deliberately light so it
+  doesn't compete with existing functional motion (trouble-border,
+  word-highlight) or add load on top of the live MediaPipe loop. Flagged one
+  open question for when 10c starts: whether the hidden webcam view should
+  be removed from the DOM or just visually hidden while tracking continues
+  underneath (assumption: the latter, not yet confirmed). Renamed project
+  header/title in this file to Mumblew. Next up: Phase 10c.
+- **Entry 28 (Jul 24):** Built and shipped Phase 10c (all 5 steps — see
+  Section 3). Logo processed from student's source image (bg removed,
+  cropped clear of corner decoration) into `mumblew_logo.png`. No open
+  flags. Next up: Phase 10d.
