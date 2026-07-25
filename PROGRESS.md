@@ -1,5 +1,5 @@
 # PROGRESS LOG — "Mumblew" (reading app)
-Last updated: July 24, 2026 (Entry 28)
+Last updated: July 25, 2026 (Entry 31)
 
 > HOW TO USE: Single source of truth. Claude reads this first in every new chat.
 > Update before ending each session. If Claude contradicts this file, trust this file.
@@ -149,24 +149,20 @@ a design gap.
   MAX_BASE_WORD_MS=800`; confirmed fixed via a clean recalibration
   (`final rate=1.024`). Multiplies with the Phase 8a tone-toggle rate when tone is
   on. **Closed, no open flags.**
-  **New gap found Entry 26, not yet fixed — scoped as Phase 12a:**
-  `estimateSyllables()` strips everything outside `[a-z]` before counting vowel
-  clusters. Two consequences, both invisible under the old fixed `READING_TEXT`
-  (which had neither) and now real now that Phase 10a allows arbitrary text:
-  - **Numbers undercounted:** `"1999,"` → 1 syllable, but Web Speech will actually
-    speak it as "nineteen ninety-nine" (far more syllables) — cadence pacing runs
-    ahead of the real spoken duration on any numeric-heavy text (dates, prices,
-    addresses).
-  - **Accented/non-English words unreliable:** `"café"` → 1, `"naïve"` → 1 (should
-    be ~2), `"jalapeño"` → 3 — accent-stripping wasn't designed with loanwords in
-    mind.
-  Confirmed via a scripted test pass (Entry 26) against a battery of arbitrary text
-  (whitespace/newlines, curly quotes, em-dashes, hyphenation, ALL CAPS, a 20k-word
-  stress test) — word-splitting itself held up cleanly (no crashes, no zero-length
-  spans) and all previously-tuned silent-e regression cases still pass; only the
-  syllable-counting rules for digits/accents need extending. Deterministic fix,
-  no `speechSynthesis` involved — low risk, doesn't need its own dedicated session
-  the way 9a/12b do.
+  **Phase 12a (numbers/accents in syllable estimation) — shipped, Entry 31.
+  Closed, no open flags.** Digit runs now expand to standard cardinal English
+  words (e.g. "1999" → "one thousand nine hundred ninety-nine") with each
+  word's syllable count looked up directly, rather than vowel-counting
+  digits. Accented characters fold to their base letter (é→e, ñ→n) instead
+  of being deleted, since deletion could merge two vowels that should stay
+  separate ("jalapeño" → "jalapeo"); a diaeresis (naïve, Zoë) gets special
+  handling since it marks a vowel as deliberately not merged with its
+  neighbor. Tested clean: all prior silent-e regression cases still pass, no
+  crashes on edge cases (empty strings, 19-digit numbers), 20k-call perf
+  negligible (130ms). One accepted minor gap: a bare `"-7"` doesn't read as
+  "negative seven" — the leading `-` is ambiguous with phone-number dashes
+  and ranges ("5-10"), so it's left as a positive number rather than risking
+  misfires on the more common cases. Low priority.
 - **Movement-range smoothing (Phase 6a):** `WINDOW_MS=300`. Confirmed still working
   correctly on mobile (Entry 23 diagnostics) — not implicated in the overshoot bug.
 - **Calibration mode (Phase 7b):** 4-step wizard (neutral → mutter → facing →
@@ -305,22 +301,68 @@ a design gap.
     for Phase 10a's saved text — PDF-extracted text can get much larger than
     typed/pasted text, and IndexedDB (considered and deliberately deferred at
     10a, Entry 26) may be worth it then, not before.
+  - **Shipped, Entry 29. Closed, no open flags.** `.pdf` upload via
+    lazy-loaded `pdfjs-dist@5.6.205` (jsdelivr, same pinned-CDN pattern as
+    MediaPipe) — text-layer extraction only, no rendering/scripting engine
+    touched. Scanned/image-only PDFs correctly report no extractable text
+    (confirmed live). 20MB upload-size guard added (`.txt` + `.pdf`) —
+    UX/DoS-on-self safeguard, not a security boundary; uploaded content was
+    already safe from injection via the existing `textContent`-only render
+    path. `vercel.json` `worker-src` extended to allow pdf.js's worker file.
+    **Saved-text persistence also migrated `localStorage` → IndexedDB**
+    (`mumblewDB`/`savedText`, single-record store) in the same session, per
+    the note above — one-time silent migration of any pre-existing
+    localStorage session on first load. Calibration data (Phase 7b/11)
+    stays on localStorage, unaffected. Confirmed live: 8MiB PDF extracted
+    correctly, reload persistence via IndexedDB confirmed working.
 - **Phase 11 — Personalized speed calibration.** Shipped Entry 18, clamp bug fixed
   Entry 23. Closed, no open flags.
 - **Phase 11b — Ambient trouble-shading.** Shipped Entry 19-21. Mobile
   blinking symptom traced to the same root cause as 9a — still open on mobile
   since 9a is shelved, not separate work.
-- **Phase 12a — Duration estimation accuracy (new, Entry 26). Not started.**
-  Extend `estimateSyllables()` to handle numbers (digit-aware syllable
-  approximation) and accented/non-English characters, surfaced by Phase 10a's
-  test pass. Deterministic, no `speechSynthesis` involved — low risk, doesn't
-  need a dedicated session the way 12b does. See Section 3 for full detail.
+- **Phase 12a — Duration estimation accuracy. Shipped, Entry 31. Closed, no
+  open flags.** See Section 3 for full detail.
 - **Phase 12b — Voice quality / robotic tone (new, Entry 26). Not started.**
   Address the flat/robotic default Web Speech voice, surfaced once real text
   (rather than the old test paragraph) started going through the app. Touches the
   live `speechSynthesis` engine — same caution and dedicated-session treatment as
   9a, deliberately not bundled with 12a. Candidate directions listed in Section 3,
   none decided yet.
+- **Phase 12c — Auto-scroll to active word (new, Entry 30).** Not started. Low
+  risk — pure DOM/rendering, no `speechSynthesis`/MediaPipe involvement. Follows
+  `.word.active` (likely via `scrollIntoView`) as reading progresses; must pause
+  on manual user scroll so it doesn't fight a reader who scrolls back up. Confirm
+  no regression on laptop first; mobile smoothness is a "check it's not broken"
+  pass only, not new mobile-tuning work (mobile stays paused per Entry 24).
+- **Phase 12d — Sticky-word bug (new, Entry 30 — but a long-observed issue, not
+  newly discovered).** Some words (e.g. "movement") occasionally stall for a
+  short duration, needing a repeat/next-word mouth action to release. Minor but
+  makes reading feel forceful on certain words. Root cause not yet
+  investigated — diagnose before fixing; may connect to cadence/detection-
+  threshold behavior, not yet confirmed.
+- **Phase 13.5 — Local on-device TTS engine (new, Entry 30). Proposed, not
+  started — deliberately standalone and revertible, placed before Phase 14 for
+  that reason (a clean rollback point if it doesn't pan out).** Replaces
+  `speechSynthesis` playback with a locally-cached WASM TTS model played via
+  `<audio>`/Web Audio, giving continuous `playbackRate` control with zero
+  re-synthesis calls — sidesteps the `speechSynthesis` call-frequency ceiling
+  (Entry 24) entirely rather than working around it. Would resolve Phase 12b
+  (robotic voice) and enable a continuous manual speed control (not separately
+  numbered — only exists if this phase ships). Also subsumes Phase 8b (voice
+  cloning) and 8c (offline mode) if shipped.
+  Engine: leaning Kokoro (Apache 2.0) over Piper — Piper's original MIT repo
+  was archived Oct 2025, active development is now GPL-3.0, a real constraint
+  given Phase 15's eventual paywall question.
+  Storage: OPFS/IndexedDB (sandboxed to the app's origin), not a visible
+  folder — no extra permission dialog beyond existing storage-quota prompts.
+  Security: requires SRI-pinned model+engine files (integrity-checked on
+  cache load too, not just first download) and scoped CSP additions — reviewed
+  alongside, not instead of, Phase 14.
+  **Gated on a real concurrent-load benchmark** (MediaPipe + local TTS
+  inference running together, measuring frame-rate stability, on actual
+  low-end hardware) — not yet run. Web Speech stays as a permanent fallback,
+  never a required gate, regardless of benchmark result.
+  **Not committed — flagged for scoping once benchmarked.**
 - **Phase 13 — Distance/recalibration robustness** (renumbered from 12, Entry 26).
   Not started. May turn out related to Phase 9c.
 - **Phase 14 — Full security review** (renumbered from 13, Entry 26; after Phase
@@ -353,17 +395,25 @@ a design gap.
         phase (Entry 27); the narrow piece still needed (calibration-view
         portrait handling) folded into 10c.
   - [x] **10c:** Full visual redesign — shipped, Entry 28. No open flags.
-  - [ ] **10d:** `.pdf` upload (needs `pdf.js` + CSP update) — not deferred,
-        own sub-phase. Also the point to revisit `localStorage` vs IndexedDB
-        for saved text. **Next up.**
+  - [x] **10d:** `.pdf` upload — shipped, Entry 29. No open flags. Also the
+        trigger point for the localStorage → IndexedDB migration (Entry 29).
+        **Phase 10 (10a/10c/10d) now fully complete; 10b dropped (Entry 27).**
 - [x] **Phase 11:** Personalized speed calibration — shipped, clamp bug fixed
       Entry 23. No open flags.
 - [x] **Phase 11b:** Ambient trouble-shading — shipped; mobile blinking is a 9a
       symptom, still open since 9a is shelved.
-- [ ] **Phase 12a:** Duration estimation accuracy (numbers, foreign words) — new,
-      Entry 26. Not started. Low-risk, deterministic fix.
+- [x] **Phase 12a:** Duration estimation accuracy (numbers, foreign words) —
+      shipped, Entry 31. No open flags.
 - [ ] **Phase 12b:** Voice quality / robotic tone — new, Entry 26. Not started.
       Touches live speech engine — needs its own dedicated session, like 9a.
+- [ ] **Phase 12c:** Auto-scroll to active word — new, Entry 30. Not started.
+      Low risk, self-contained.
+- [ ] **Phase 12d:** Sticky-word bug (e.g. "movement" stalling) — new to the log
+      (Entry 30) but long-observed. Not root-caused yet.
+- [ ] **Phase 13.5:** Local on-device TTS engine — new, Entry 30. Proposed, not
+      committed. Standalone/revertible, gated on a concurrent-load benchmark
+      not yet run. Would resolve 12b + enable continuous speed control; also
+      subsumes 8b/8c if shipped.
 - [ ] **Phase 13:** Distance / recalibration robustness (renumbered from 12).
 - [ ] **Phase 14:** Full security review pass (renumbered from 13; after Phase 10).
 - [ ] **Phase 15:** Shipping prep + paywall (renumbered from 14).
@@ -386,11 +436,18 @@ collapsible debug panel, and light animation, on top of Phase 10a's text input.
 Project now has a third asset: `mumblew_logo.png` (transparent, dark-mode ready)
 sits alongside `index.html`/`main.js`.
 
-**Phases 12a/12b (Entry 26) remain not-yet-started, unaffected by 10c:**
-duration-estimation gaps (numbers/accented words) and robotic default-voice
-quality — see Section 3 for detail on each.
+**Phase 10d shipped (Entry 29)** — `.pdf` upload (text-layer extraction via
+`pdf.js`) plus a localStorage→IndexedDB migration for saved text (see
+Section 3). **Phase 10 is now fully complete** (10a/10c/10d shipped, 10b
+dropped). No open flags on any of Phase 10.
 
-**Next up: Phase 10d** (`.pdf` upload).
+**Phase 12a shipped (Entry 31)** — see Section 3. **Phase 12b remains
+not-yet-started**, unaffected by 12a: robotic default-voice quality, touches
+live `speechSynthesis`, needs its own dedicated session like 9a.
+
+**Agreed build order (Entry 31): 12a → 12c → 12d → then benchmark/decide
+between 12b and 13.5.** 12a done. Next up: **12c (auto-scroll to active
+word)**.
 
 Temporary diagnostics still live in the debug panel from the Entry 22-23
 mobile-testing effort (boundary event counter, last-onboundary timer, speed-fit
@@ -502,3 +559,27 @@ Key technical values/constants are all in Section 3 — not duplicated here.
   Section 3). Logo processed from student's source image (bg removed,
   cropped clear of corner decoration) into `mumblew_logo.png`. No open
   flags. Next up: Phase 10d.
+- **Entry 29 (Jul 25):** Built and shipped Phase 10d (`.pdf` upload) and,
+  same session, migrated saved-text persistence from localStorage to
+  IndexedDB (see Section 3 for both). Confirmed live by student: 8MiB PDF
+  extracted correctly, scanned/image PDF correctly errors as no-text-found,
+  reload persistence via IndexedDB confirmed working. **Phase 10 fully
+  complete.** No open flags. Next phase not yet chosen.
+- **Entry 30 (Jul 25):** Scoping discussion only, no code changed. Added
+  Phase 12c (auto-scroll to active word) and 12d (long-observed sticky-word
+  stall bug). Discussed a continuous manual speed control at length — rejected
+  wheel-driven `cancel()`/`speak()` and sentence-boundary-triggered updates,
+  both re-hitting 9a's `speechSynthesis` call-frequency ceiling; led to a
+  bigger idea — replacing `speechSynthesis` with a locally-cached WASM TTS
+  model played via `<audio>`/Web Audio for real continuous `playbackRate`
+  control with zero re-synthesis calls. Scoped security (SRI pinning, CSP,
+  OPFS/IndexedDB storage instead of a visible folder), verified voice-model
+  licensing (Kokoro/Apache-2.0 favored over Piper, whose license moved
+  MIT→GPL-3.0 in Oct 2025), and flagged it needs a real concurrent MediaPipe+TTS
+  benchmark on real hardware before commitment — not run yet. Logged as
+  **Phase 13.5**, placed before Phase 14 deliberately (standalone/revertible).
+  Explicitly not committed or started. See Section 3c for full detail.
+- **Entry 31 (Jul 25):** Agreed build order for the Phase 12 group: 12a → 12c
+  → 12d → benchmark/decide 12b vs 13.5. Built and shipped Phase 12a (digit
+  and accent handling in `estimateSyllables()`) — tested clean, no
+  regressions. Closed, no open flags. Next up: 12c.

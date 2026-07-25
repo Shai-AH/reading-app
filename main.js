@@ -48,6 +48,42 @@ video.addEventListener('loadedmetadata', updateVideoBoxSize);
 window.addEventListener('resize', updateVideoBoxSize);
 window.addEventListener('orientationchange', updateVideoBoxSize);
 
+// --- Phase 12c: manual-scroll detection ---
+// Deliberately listens for the *gestures* that only ever originate from a
+// real user action (wheel, touch drag, keyboard paging) rather than the
+// 'scroll' event itself — 'scroll' also fires for our own programmatic
+// scrollIntoView() calls below, and there's no reliable way to tell those
+// apart after the fact without extra bookkeeping. Listening one level up,
+// at the gesture, sidesteps that ambiguity entirely.
+const SCROLL_KEYS = new Set([
+  'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '
+]);
+// Revised per live feedback: an indefinite session-long pause felt like
+// auto-scroll had "completely switched off" rather than yielded — a reader
+// glancing back at an earlier word expects to be picked back up once they
+// stop interacting, not to have to click a word or restart the session.
+// AUTO_SCROLL_RESUME_IDLE_MS is a starting guess (project convention — see
+// MS_PER_SYLLABLE etc. — ship simple, tune from real use); the debounce
+// (clearTimeout+reschedule on every gesture, not just the first) means the
+// clock only starts once the reader actually stops touching the page, so a
+// long deliberate scroll-and-read doesn't get yanked mid-interaction.
+const AUTO_SCROLL_RESUME_IDLE_MS = 4000;
+let resumeAutoScrollTimer = null;
+function onManualScrollGesture() {
+  autoScrollEnabled = false;
+  if (resumeAutoScrollTimer !== null) clearTimeout(resumeAutoScrollTimer);
+  resumeAutoScrollTimer = setTimeout(() => {
+    resumeAutoScrollTimer = null;
+    autoScrollEnabled = true;
+    scrollToActiveWord(); // catch up immediately rather than waiting for the next word boundary
+  }, AUTO_SCROLL_RESUME_IDLE_MS);
+}
+window.addEventListener('wheel', onManualScrollGesture, { passive: true });
+window.addEventListener('touchmove', onManualScrollGesture, { passive: true });
+window.addEventListener('keydown', (e) => {
+  if (SCROLL_KEYS.has(e.key)) onManualScrollGesture();
+});
+
 let faceLandmarker;
 
 // --- Phase 2: mouth-open/closed detection + speech wiring ---
@@ -186,27 +222,154 @@ const cadenceValueEl = document.getElementById('cadenceValue');
 // expected duration, even after any silent-e subtraction.
 const SILENT_E_SUFFIXES = ['ment', 'ness', 'less', 'ful', 'ly', 'ship', 'ward', 'some'];
 
+// --- Phase 12a: digit-aware syllable estimation -----------------------------
+// estimateSyllables previously stripped everything outside [a-z], which
+// silently deleted digits entirely — "1999," estimated as 1 syllable when
+// Web Speech will actually speak something like "one thousand nine hundred
+// ninety-nine" (or, on some voices, "nineteen ninety-nine" — browsers aren't
+// consistent about year-style vs cardinal reading of bare numbers, and we
+// have no reliable way to know which a given voice will pick). We expand to
+// the *standard cardinal* reading (not year-style) as a deterministic,
+// voice-independent approximation: it lands in the right order of magnitude
+// for pacing purposes even when it doesn't match a particular voice's exact
+// phrasing, which is what actually caused the bug (running 1 syllable vs the
+// several actually spoken, not the specific choice of phrasing).
+//
+// Each number word's syllable count is looked up directly (small closed
+// vocabulary) rather than vowel-counted, since counting vowels in "thousand"
+// or "eight" is no more reliable than just knowing the answer.
+const NUMBER_WORD_ONES = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven',
+  'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen',
+  'sixteen', 'seventeen', 'eighteen', 'nineteen'];
+const NUMBER_WORD_TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+const NUMBER_WORD_SCALES = ['', 'thousand', 'million', 'billion', 'trillion'];
+const NUMBER_WORD_SYLLABLES = {
+  zero: 2, one: 1, two: 1, three: 1, four: 1, five: 1, six: 1, seven: 2, eight: 1, nine: 1, ten: 1,
+  eleven: 3, twelve: 1, thirteen: 2, fourteen: 2, fifteen: 2, sixteen: 2, seventeen: 3, eighteen: 2, nineteen: 2,
+  twenty: 2, thirty: 2, forty: 2, fifty: 2, sixty: 2, seventy: 3, eighty: 2, ninety: 2,
+  hundred: 2, thousand: 2, million: 2, billion: 2, trillion: 2, point: 1, negative: 3
+};
+
+function threeDigitGroupToWords(n) {
+  const words = [];
+  const hundreds = Math.floor(n / 100);
+  const rest = n % 100;
+  if (hundreds > 0) {
+    words.push(NUMBER_WORD_ONES[hundreds], 'hundred');
+  }
+  if (rest > 0) {
+    if (rest < 20) {
+      words.push(NUMBER_WORD_ONES[rest]);
+    } else {
+      const tens = Math.floor(rest / 10);
+      const ones = rest % 10;
+      words.push(NUMBER_WORD_TENS[tens]);
+      if (ones > 0) words.push(NUMBER_WORD_ONES[ones]);
+    }
+  }
+  return words;
+}
+
+function integerDigitsToWords(digits) {
+  let s = digits.replace(/^0+(?=\d)/, '');
+  if (s === '' || parseInt(s, 10) === 0) return ['zero'];
+  // Beyond our scale-word list (quadrillion+) — vanishingly unlikely in real
+  // reading text, and reading digit-by-digit is still a reasonable fallback
+  // rather than crashing or guessing wildly.
+  if (s.length > 15) {
+    return s.split('').map(d => NUMBER_WORD_ONES[parseInt(d, 10)]);
+  }
+  const groups = [];
+  let rem = s;
+  while (rem.length > 0) {
+    const len = rem.length % 3 === 0 ? 3 : rem.length % 3;
+    groups.push(rem.slice(0, len));
+    rem = rem.slice(len);
+  }
+  const words = [];
+  for (let i = 0; i < groups.length; i++) {
+    const g = parseInt(groups[i], 10);
+    if (g === 0) continue;
+    const scaleIdx = groups.length - 1 - i;
+    words.push(...threeDigitGroupToWords(g));
+    if (scaleIdx > 0 && NUMBER_WORD_SCALES[scaleIdx]) words.push(NUMBER_WORD_SCALES[scaleIdx]);
+  }
+  return words;
+}
+
+// numStr: a run of digits, optionally with '-' sign, ',' thousands
+// separators, and one '.' decimal point (whatever a single regex match of
+// /\d[\d,]*(?:\.\d+)?/ can capture — see call site).
+function estimateNumberWordSyllables(numStr) {
+  const negative = numStr.startsWith('-');
+  const body = negative ? numStr.slice(1) : numStr;
+  const parts = body.split('.');
+  const intDigits = parts[0].replace(/,/g, '') || '0';
+  let words = integerDigitsToWords(intDigits);
+  if (negative) words = ['negative', ...words];
+  if (parts.length > 1 && parts[1].length > 0) {
+    words.push('point');
+    for (const d of parts[1]) {
+      if (/\d/.test(d)) words.push(NUMBER_WORD_ONES[parseInt(d, 10)]);
+    }
+  }
+  return words.reduce((sum, w) => sum + (NUMBER_WORD_SYLLABLES[w] || 1), 0);
+}
+
 function estimateSyllables(word) {
-  const cleaned = word.toLowerCase().replace(/[^a-z]/g, '');
-  const matches = cleaned.match(/[aeiouy]+/g);
+  // Digit runs (handles things like "1999,", "3.14", "$45.50", or a
+  // hyphenated run like "555-1234" as two separate runs) are pulled out and
+  // syllable-counted via the number-word expansion above, then removed from
+  // the string before the original letter-based logic runs on what's left
+  // (so e.g. "COVID-19" counts "covid" by the normal rules and "19" via the
+  // number path, rather than either double-counting or the digits vanishing).
+  const numberRuns = word.match(/\d[\d,]*(?:\.\d+)?/g) || [];
+  let numberSyllables = 0;
+  for (const run of numberRuns) {
+    numberSyllables += estimateNumberWordSyllables(run);
+  }
+  const lettersOnly = word.replace(/\d[\d,]*(?:\.\d+)?/g, '');
+
+  // --- Accented/non-English characters --------------------------------
+  // The old `[^a-z]` strip deleted accent marks along with their base
+  // letter, which could silently merge two vowels that should stay
+  // separate (e.g. "jalapeño" -> "jalapeo", collapsing 'e'+'o' into one
+  // cluster and undercounting). Fold to the base letter instead (é -> e,
+  // ñ -> n) so consonant diacritics still act as consonants (keeping
+  // vowels on either side separate) and vowel diacritics still contribute
+  // a vowel to the count.
+  const hadAccentedFinalE = /[éèêë]$/i.test(lettersOnly.trim());
+  // A diaeresis (naïve, Zoë, Chloë) specifically exists to mark a vowel as
+  // pronounced separately from an *adjacent* vowel rather than merged into
+  // one sound/cluster — insert a break for exactly that case before the
+  // mark itself is stripped, so e.g. "naive" (from "naïve") doesn't get
+  // "a"+"i" counted as a single cluster the way an unmarked word would.
+  let nfd = lettersOnly.toLowerCase().normalize('NFD');
+  nfd = nfd.replace(/([aeiouy])([aeiouy]\u0308)/g, '$1|$2');
+  const cleanedWithBreaks = nfd.replace(/[\u0300-\u036f]/g, '').replace(/[^a-z|]/g, '');
+  const cleaned = cleanedWithBreaks.replace(/\|/g, '');
+
+  const matches = cleanedWithBreaks.match(/[aeiouy]+/g);
   let syllables = matches ? matches.length : 0;
 
   const endsInConsonantLe = /[^aeiouy]le$/.test(cleaned);
-  if (cleaned.endsWith('e') && !endsInConsonantLe && syllables > 1) {
+  if (cleaned.endsWith('e') && !endsInConsonantLe && !hadAccentedFinalE && syllables > 1) {
     syllables -= 1;
   }
 
-  for (const suffix of SILENT_E_SUFFIXES) {
-    if (cleaned.endsWith(suffix) && cleaned.length > suffix.length) {
-      const stem = cleaned.slice(0, -suffix.length);
-      if (/[aeiouy][^aeiouy]e$/.test(stem) && syllables > 1) {
-        syllables -= 1;
+  if (!hadAccentedFinalE) {
+    for (const suffix of SILENT_E_SUFFIXES) {
+      if (cleaned.endsWith(suffix) && cleaned.length > suffix.length) {
+        const stem = cleaned.slice(0, -suffix.length);
+        if (/[aeiouy][^aeiouy]e$/.test(stem) && syllables > 1) {
+          syllables -= 1;
+        }
+        break; // only one suffix can match the end of a word
       }
-      break; // only one suffix can match the end of a word
     }
   }
 
-  return Math.max(1, syllables);
+  return Math.max(1, syllables + numberSyllables);
 }
 
 function estimateWordDuration(word) {
@@ -303,7 +466,67 @@ const SAMPLE_TEXT_FOR_TESTING = "This is a longer piece of test text for phase t
   "still moving. Wait, did you hear that? That was surprising! This next part should sound " +
   "different, exciting even!";
 
-const TEXT_STORAGE_KEY = 'readingAppText';
+const TEXT_STORAGE_KEY = 'readingAppText'; // old localStorage key — read once for migration, then unused
+
+// --- Text persistence: IndexedDB (not localStorage) ---
+// Decided at 10d ship time: PDF-extracted text can get much larger than
+// typed/pasted or .txt text, and localStorage (i) has a hard ~5-10MB
+// per-origin quota shared with the calibration data, and (ii) is
+// synchronous, so a big write can jank the main thread. IndexedDB has no
+// practically-relevant size ceiling for this use case and is async by
+// design. Calibration data (Phase 7b/11) stays on localStorage — it's a
+// few numbers, not a growing-text problem, no reason to touch it.
+//
+// Single object store, single fixed-key record — this isn't a real
+// multi-record database, just a bigger/async localStorage replacement for
+// one blob, so no keyPath/indexes are needed.
+const TEXT_DB_NAME = 'mumblewDB';
+const TEXT_DB_VERSION = 1;
+const TEXT_STORE_NAME = 'savedText';
+const TEXT_RECORD_KEY = 'current';
+
+function openTextDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(TEXT_DB_NAME, TEXT_DB_VERSION);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(TEXT_STORE_NAME)) {
+        req.result.createObjectStore(TEXT_STORE_NAME);
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbSetText(data) {
+  const db = await openTextDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(TEXT_STORE_NAME, 'readwrite');
+    tx.objectStore(TEXT_STORE_NAME).put(data, TEXT_RECORD_KEY);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function idbGetText() {
+  const db = await openTextDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(TEXT_STORE_NAME, 'readonly');
+    const req = tx.objectStore(TEXT_STORE_NAME).get(TEXT_RECORD_KEY);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function idbDeleteText() {
+  const db = await openTextDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(TEXT_STORE_NAME, 'readwrite');
+    tx.objectStore(TEXT_STORE_NAME).delete(TEXT_RECORD_KEY);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
 
 let currentText = null;           // the active reading text; null until loaded
 let lastLoadedFileName = null;    // set on .txt upload, cleared on manual textarea edits —
@@ -341,6 +564,33 @@ let wordSpans = [];             // { span, start, end } built from currentText
 let activeWordIndex = -1;
 let lastWordBoundaryTime = 0;        // Phase 11b (fixed): performance.now() at the most recent onboundary
 let currentSpokenWordExpectedMs = 0; // expected duration for the word currently being spoken
+
+// --- Phase 12c: auto-scroll to active word ---
+// Follows .word.active as reading progresses (via highlightWordAt, the single
+// place the active word ever changes — both mouth-driven progression and
+// manual word-click resync flow through it). Must yield to a reader who
+// scrolls back up on their own rather than yanking them back down every
+// tick, so a genuine user scroll gesture (wheel/touch drag/keyboard paging)
+// latches autoScrollEnabled off. It re-latches on a fresh session start
+// (Start Reading / word-click resync — both are "jump to a spot" actions
+// already) OR after AUTO_SCROLL_RESUME_IDLE_MS of no further manual
+// scrolling, whichever comes first (see the idle-resume timer above) — so a
+// reader who glances back up gets picked back up automatically instead of
+// auto-scroll staying off for the rest of the session.
+let autoScrollEnabled = true;
+const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+// Phase 12c: shared by highlightWordAt (every natural word-boundary update)
+// and the idle-resume timer above (catches back up after a manual-scroll
+// pause expires, rather than waiting for the next word to trigger it).
+// No-ops safely if called before any word is active yet.
+function scrollToActiveWord() {
+  if (activeWordIndex === -1) return;
+  wordSpans[activeWordIndex].span.scrollIntoView({
+    behavior: reducedMotionQuery.matches ? 'auto' : 'smooth',
+    block: 'nearest'
+  });
+}
 
 const marValueEl = document.getElementById('marValue');
 const movementRangeValueEl = document.getElementById('movementRangeValue');
@@ -1448,15 +1698,13 @@ function setCurrentText(text, sourceLabel, opts = {}) {
   updateStartButtonState();
 
   if (persist) {
-    try {
-      localStorage.setItem(TEXT_STORAGE_KEY, JSON.stringify({
-        text: currentText,
-        sourceLabel,
-        savedAt: new Date().toISOString()
-      }));
-    } catch (err) {
+    idbSetText({
+      text: currentText,
+      sourceLabel,
+      savedAt: new Date().toISOString()
+    }).catch((err) => {
       console.error('Could not save reading text:', err);
-    }
+    });
   }
 }
 
@@ -1469,25 +1717,44 @@ function showTextLoadError(message) {
 // session's text is found, restore it into both currentText and the
 // textarea (so it's visible/editable) and enable Start immediately, same as
 // if it had just been loaded this session.
-function loadSavedText() {
-  let raw;
-  try {
-    raw = localStorage.getItem(TEXT_STORAGE_KEY);
-  } catch (err) {
-    console.error('Could not read saved reading text:', err);
-    return;
-  }
-  if (!raw) return;
+//
+// One-time migration: anyone who used the app before this change has their
+// saved text sitting in the old localStorage key, not IndexedDB. Check
+// IndexedDB first (the normal path going forward); only if it's empty, fall
+// back to localStorage, restore from there, write it into IndexedDB, and
+// remove the old key — so migration happens transparently on next load and
+// never runs twice.
+async function loadSavedText() {
+  let data = null;
 
   try {
-    const data = JSON.parse(raw);
-    if (typeof data.text !== 'string' || data.text.trim().length === 0) return;
-    textInputAreaEl.value = data.text;
-    const when = new Date(data.savedAt).toLocaleString();
-    setCurrentText(data.text, `restored from last session, ${when}`, { persist: false });
+    data = await idbGetText();
   } catch (err) {
-    console.error('Saved reading text was corrupted, ignoring:', err);
+    console.error('Could not read saved reading text from IndexedDB:', err);
   }
+
+  if (!data) {
+    try {
+      const raw = localStorage.getItem(TEXT_STORAGE_KEY);
+      if (raw) {
+        const legacy = JSON.parse(raw);
+        if (typeof legacy.text === 'string' && legacy.text.trim().length > 0) {
+          data = legacy;
+          idbSetText(legacy)
+            .then(() => localStorage.removeItem(TEXT_STORAGE_KEY))
+            .catch((err) => console.error('Could not migrate saved text to IndexedDB:', err));
+        }
+      }
+    } catch (err) {
+      console.error('Saved reading text (legacy localStorage) was corrupted, ignoring:', err);
+    }
+  }
+
+  if (!data || typeof data.text !== 'string' || data.text.trim().length === 0) return;
+
+  textInputAreaEl.value = data.text;
+  const when = new Date(data.savedAt).toLocaleString();
+  setCurrentText(data.text, `restored from last session, ${when}`, { persist: false });
 }
 
 loadTextBtnEl.addEventListener('click', () => {
@@ -1508,13 +1775,106 @@ textInputAreaEl.addEventListener('input', () => {
   lastLoadedFileName = null;
 });
 
+// --- Phase 10d: .pdf upload ---
+// pdf.js is loaded lazily (dynamic import), only once a .pdf is actually
+// picked — students who only ever paste/type or use .txt never pay for it.
+// Same CDN-via-jsdelivr pattern already used for MediaPipe (Section 3 of
+// PROGRESS.md), pinned to a specific version like MediaPipe's @0.10.14 pin,
+// not @latest, so a future upstream release can't silently change behavior
+// under us. pdf.js 5.x ships ESM-only, so this is a plain dynamic import,
+// no bundler needed — consistent with the project's no-build-tools stack.
+// The worker file needs its own CSP allowance (vercel.json worker-src) since
+// browsers instantiate it directly from the given URL rather than treating
+// it as a same-origin script.
+const PDFJS_VERSION = '5.6.205';
+const PDFJS_BASE = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build/`;
+
+let pdfjsLibPromise = null;
+function loadPdfJs() {
+  if (!pdfjsLibPromise) {
+    pdfjsLibPromise = import(PDFJS_BASE + 'pdf.min.mjs').then((lib) => {
+      lib.GlobalWorkerOptions.workerSrc = PDFJS_BASE + 'pdf.worker.min.mjs';
+      return lib;
+    });
+  }
+  return pdfjsLibPromise;
+}
+
+// Text-only extraction (no rendering/canvas involved) — pulls each page's
+// text items and joins them, page breaks as blank lines so paragraph shape
+// survives roughly intact. Scanned/image-only PDFs have no text layer at
+// all, so they'll come back empty — surfaced as a normal "no text found"
+// status message rather than an error, since nothing actually went wrong.
+async function extractPdfText(file) {
+  const pdfjsLib = await loadPdfJs();
+  const data = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data }).promise;
+
+  const pageTexts = [];
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const content = await page.getTextContent();
+    pageTexts.push(content.items.map((item) => item.str).join(' ').trim());
+  }
+  return pageTexts.join('\n\n');
+}
+
+async function handlePdfFile(file) {
+  textLoadStatusEl.style.color = '#555';
+  textLoadStatusEl.textContent = `Reading "${file.name}"…`;
+
+  let text;
+  try {
+    text = await extractPdfText(file);
+  } catch (err) {
+    console.error('PDF extraction failed:', err);
+    showTextLoadError(`Could not read "${file.name}" — it may be password-protected or corrupted.`);
+    return;
+  }
+
+  if (text.trim().length === 0) {
+    showTextLoadError(`"${file.name}" has no extractable text — it may be a scanned/image-only PDF.`);
+    return;
+  }
+
+  textInputAreaEl.value = text;
+  lastLoadedFileName = file.name;
+  textLoadStatusEl.style.color = '#555';
+  textLoadStatusEl.textContent = `"${file.name}" loaded into the box below — click Load Text to use it.`;
+}
+
+// Phase 10d: sane upload-size ceiling. Not a security boundary (nothing in
+// an uploaded file executes — see rendering path, which is textContent-only)
+// but a huge file can hang the tab mid-parse or blow past localStorage's
+// quota silently. 20MB is generous headroom above any real reading text
+// (a 20MB .txt is ~a shelf of books; a 20MB PDF is a large document) while
+// still catching accidental wrong-file selections early with a clear message
+// instead of a stuck "Reading..." status.
+const MAX_UPLOAD_FILE_SIZE_BYTES = 20 * 1024 * 1024;
+
 txtFileInputEl.addEventListener('change', () => {
   const file = txtFileInputEl.files[0];
   if (!file) return;
 
-  if (!file.name.toLowerCase().endsWith('.txt')) {
-    showTextLoadError('Please choose a .txt file (PDF upload is coming in a later phase).');
+  const lowerName = file.name.toLowerCase();
+  const isTxt = lowerName.endsWith('.txt');
+  const isPdf = lowerName.endsWith('.pdf');
+
+  if (!isTxt && !isPdf) {
+    showTextLoadError('Please choose a .txt or .pdf file.');
     txtFileInputEl.value = '';
+    return;
+  }
+
+  if (file.size > MAX_UPLOAD_FILE_SIZE_BYTES) {
+    showTextLoadError(`"${file.name}" is too large (${(file.size / (1024 * 1024)).toFixed(1)}MB, limit 20MB).`);
+    txtFileInputEl.value = '';
+    return;
+  }
+
+  if (isPdf) {
+    handlePdfFile(file);
+    txtFileInputEl.value = ''; // allow re-selecting the same file later
     return;
   }
 
@@ -1562,6 +1922,8 @@ function onWordClick(wordIndex) {
   baseOffset = word.start;
   lastBoundaryOffset = 0;
   readingActive = true; // allow resync to also restart a finished reading
+  autoScrollEnabled = true; // Phase 12c: a click is itself an intentional jump, resume following
+  if (resumeAutoScrollTimer !== null) { clearTimeout(resumeAutoScrollTimer); resumeAutoScrollTimer = null; }
   highlightWordAt(baseOffset);
   speechStateEl.textContent = 'waiting for mouth to open';
 
@@ -1581,6 +1943,16 @@ function highlightWordAt(charIndex) {
   }
   wordSpans[idx].span.classList.add('active');
   activeWordIndex = idx;
+
+  // Phase 12c: keep the active word in view as reading progresses. 'nearest'
+  // means a word that's already visible doesn't cause any scroll jitter —
+  // only a word that's actually scrolled out of view (top or bottom) pulls
+  // the page. Respects prefers-reduced-motion the same way the CSS
+  // animations already do (Phase 10c) rather than forcing a smooth scroll
+  // on someone who's asked the OS/browser to minimize motion.
+  if (autoScrollEnabled) {
+    scrollToActiveWord();
+  }
 
   // Phase 11b bugfix: per-word cadence clock, independent of mouthOpenStartTime.
   // mouthOpenStartTime only resets on a closed->open transition, which during
@@ -1909,6 +2281,8 @@ startBtn.addEventListener('click', () => {
   baseOffset = 0;
   lastBoundaryOffset = 0;
   readingActive = true;
+  autoScrollEnabled = true; // Phase 12c: fresh session, resume following the active word
+  if (resumeAutoScrollTimer !== null) { clearTimeout(resumeAutoScrollTimer); resumeAutoScrollTimer = null; }
   marBuffer = []; // fresh window so a stale pre-click buffer can't cause a false stop
   resetTroubleShading(); // Phase 11b: fresh session shouldn't inherit a lingering score/pulse cooldown
   speechStateEl.textContent = 'waiting for mouth to open';
@@ -1937,7 +2311,7 @@ async function setup() {
   });
 
   loadSavedCalibration();
-  loadSavedText();
+  await loadSavedText();
   startWebcam();
 }
 
