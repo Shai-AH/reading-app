@@ -946,48 +946,26 @@ const readingTextEl = document.getElementById('readingText');
 //   Measured pitch boundary: -20.8 to -21.7, symmetric up/down.
 // Thresholds set just above each measured boundary, same margin approach used
 // for STOPPED_RANGE_THRESHOLD.
-const DEFAULT_YAW_THRESHOLD = 26;
-const DEFAULT_PITCH_THRESHOLD = 21;
-let YAW_THRESHOLD = DEFAULT_YAW_THRESHOLD;
-let PITCH_THRESHOLD = DEFAULT_PITCH_THRESHOLD;
-
-// Mobile testing fix (post-Entry-22): EMA smoothing on yaw/pitch before any
-// decision uses them. Raw single-frame yaw/pitch was fine on a stationary
-// laptop webcam — all noise was real head movement. On a handheld phone the
-// camera itself moves with hand tremor, and yaw/pitch (Phase 3) are measured
-// relative to the camera, not the world — tremor is indistinguishable from
-// real head rotation in this signal alone. Smoothing filters the
-// high-frequency tremor component while a genuine deliberate look-away
-// (sustained, and well past the 26°/21° thresholds) still comes through.
-// Same EMA shape as RATE_SMOOTHING_ALPHA (Speed step). Reasoned starting
-// guess, not yet live-tuned against real handheld footage — same tier as
-// every other new constant here before its first real test. If gating still
-// feels twitchy on mobile after this, lower it further (more smoothing,
-// more lag); if look-aways start feeling sluggish to register, raise it.
-const POSE_SMOOTHING_ALPHA = 0.2;
-
-// Phase 9b: distinct from the yaw/pitch-exceeds-threshold gate above — this
-// covers MediaPipe returning zero landmarks at all (camera pointed away
-// entirely, obstructed, etc). Confirmed by code inspection (Entry 23): that
-// case previously just skipped the frame silently, so isFacingScreen/
+// Phase 9b: covers MediaPipe returning zero landmarks at all (camera pointed
+// away entirely, obstructed, etc). Confirmed by code inspection (Entry 23):
+// that case previously just skipped the frame silently, so isFaceVisible/
 // mouthState froze at whatever they last were and TTS kept speaking
 // indefinitely with nobody in frame. Not mobile-exclusive — same gap exists
 // on laptop, just less likely to be triggered there. A short timeout rather
 // than an immediate trip, so one dropped frame (camera hiccup, brief motion
-// blur) doesn't falsely gate — same reasoning as POSE_SMOOTHING_ALPHA above,
-// different mechanism (missing data vs. noisy data).
+// blur) doesn't falsely gate.
 const NO_FACE_TIMEOUT_MS = 500;
 let noFaceSince = null; // performance.now() timestamp of when landmarks last went missing, or null while a face is being seen
 
-let isFacingScreen = true;
-let lastYaw = 0;   // Phase 11b: most recent yaw/pitch, kept outside updateHeadPose's
-let lastPitch = 0; // own scope so the trouble-shading score (computed once per frame
-let smoothedYaw = null;   // EMA state for POSE_SMOOTHING_ALPHA — null until first real frame seeds it
-let smoothedPitch = null;
-                    // in predictLoop) can read it without recomputing.
+// Head-pose gating (Phase 3) removed (Entry 45 — decided Entry 43, scoped
+// Entry 44): the biological ceiling here (ALS-associated head-drop; lying
+// down as a primary, not edge, use case — Section 1) meant "facing the
+// screen" was an unreliable proxy for engagement for exactly the audience
+// this app most needs to serve, and mouth movement already is the honest
+// signal. isFaceVisible now means only "MediaPipe currently sees a face at
+// all" (Phase 9b's job) — no yaw/pitch involved.
+let isFaceVisible = true;
 
-const yawValueEl = document.getElementById('yawValue');
-const pitchValueEl = document.getElementById('pitchValue');
 const facingStateEl = document.getElementById('facingState');
 
 // --- Phase 7b: guided in-app calibration mode ---
@@ -1000,16 +978,14 @@ const facingStateEl = document.getElementById('facingState');
 // here and stay as fixed constants for now.
 const CALIBRATION_STORAGE_KEY = 'readingAppCalibration';
 
-// Minimum required MAR gap between the neutral and mouthing-speech steps,
-// and a minimum degrees-turned floor for head-pose thresholds. Both exist to
-// reject a bad calibration run (e.g. user didn't actually mouth words, or
-// didn't turn their head) rather than silently saving broken thresholds.
-// MIN_MAR_GAP set well below the real neutral-vs-mutter gap this project has
-// actually measured (~0.023, see Phase 6a calibration notes) so a genuine
-// attempt always clears it. MIN_POSE_THRESHOLD set well above the normal
-// reading wobble measured in Phase 7a (yaw ~1°, pitch ~4-5°).
+// Minimum required MAR gap between the neutral and mouthing-speech steps.
+// Exists to reject a bad calibration run (e.g. user didn't actually mouth
+// words) rather than silently saving broken thresholds. Set well below the
+// real neutral-vs-mutter gap this project has actually measured (~0.023,
+// see Phase 6a calibration notes) so a genuine attempt always clears it.
+// (A matching MIN_POSE_THRESHOLD existed here for head-pose calibration —
+// removed Entry 45 along with the rest of pose gating.)
 const MIN_MAR_GAP = 0.015;
-const MIN_POSE_THRESHOLD = 8; // degrees; also acts as a floor on the derived threshold
 
 // Phase 11: validation for the Speed step's regression. A duration-per-word
 // regression needs both (a) enough data points and (b) enough syllable-count
@@ -1018,7 +994,7 @@ const MIN_POSE_THRESHOLD = 8; // degrees; also acts as a floor on the derived th
 // same failure shape as trying to fit a line through points with no spread
 // on the x-axis. Both are checked in finishCalibration before trusting the
 // fit, same "reject rather than silently save broken values" pattern as
-// MIN_MAR_GAP/MIN_POSE_THRESHOLD above.
+// MIN_MAR_GAP above.
 const MIN_RATE_WORDS_CAPTURED = 6;
 const MIN_RATE_SYLLABLE_SPREAD = 2; // max syllables captured - min syllables captured, must exceed this
 
@@ -1147,11 +1123,12 @@ const MAX_BASE_WORD_MS = 800;
 //   2. A second, separate SHARP cue (a quick pulse, not a hue) layered on
 //      top for hard failures (a stuck word, a real head-pose gate trip) —
 //      slow drift is the wrong shape for a discrete event.
-//   3. Reads off this user's CALIBRATED thresholds (YAW_THRESHOLD,
-//      PITCH_THRESHOLD, currentSpokenWordExpectedMs from Phase 11's
-//      personalized cadence), not raw values — so a twitchy mumbler and a
-//      slow one both see "trouble" mean the same thing: how close they are
-//      to THEIR OWN threshold, not an absolute scale.
+//   3. Reads off this user's CALIBRATED thresholds (currentSpokenWordExpectedMs
+//      from Phase 11's personalized cadence), not raw values — so a twitchy
+//      mumbler and a slow one both see "trouble" mean the same thing: how
+//      close they are to THEIR OWN threshold, not an absolute scale.
+//      (Originally also read pose thresholds — removed Entry 45, see the
+//      head-pose-removal note above computeRawTroubleScore.)
 //   4. Hue is paired with opacity+saturation, not used alone, for red/green
 //      colorblind accessibility.
 //
@@ -1188,17 +1165,6 @@ let lastPulseTime = 0;
 const readingPaneEl = document.getElementById('readingPane');
 const troubleValueEl = document.getElementById('troubleValue');
 
-// Pose trouble: continuous distance toward THIS user's calibrated gating
-// boundary, normalized 0-1. Naturally ~0 during normal reading wobble and
-// rises smoothly as the user approaches (not just crosses) the threshold —
-// gives earlier, gentler warning than waiting for an actual gate trip.
-function computePoseTrouble() {
-  if (YAW_THRESHOLD <= 0 || PITCH_THRESHOLD <= 0) return 0;
-  const yawFrac = Math.abs(lastYaw) / YAW_THRESHOLD;
-  const pitchFrac = Math.abs(lastPitch) / PITCH_THRESHOLD;
-  return Math.min(1, Math.max(yawFrac, pitchFrac));
-}
-
 // Cadence trouble: only meaningful while a word is actively open past its
 // (personalized, Phase 11) expected duration — 0 while still within the
 // expected window, ramping up to 1 at TROUBLE_CADENCE_OVERRUN_CAP times over.
@@ -1218,7 +1184,10 @@ function computeCadenceTrouble() {
 
 function computeRawTroubleScore() {
   if (!readingActive) return 0; // calm border whenever there's no active session to have trouble in
-  return Math.max(computePoseTrouble(), computeCadenceTrouble());
+  // Head-pose removed (Entry 45) — cadence overrun is the only remaining
+  // continuous trouble source. max() kept as the combining shape in case a
+  // future signal joins it, even though there's only one input today.
+  return Math.max(computeCadenceTrouble());
 }
 
 // Called once per frame from predictLoop (skipped during calibration, same
@@ -1273,10 +1242,12 @@ function resetTroubleShading() {
   troubleValueEl.textContent = '0.00';
 }
 
+// Phase 7b's 'facing'/'away' pose-calibration steps removed Entry 45
+// alongside the rest of head-pose gating — wizard is 3 steps now, not 5.
 const CALIBRATION_STEPS = [
   {
     id: 'neutral',
-    label: 'Step 1 of 5 — Neutral face',
+    label: 'Step 1 of 3 — Neutral face',
     instruction: 'Relax your mouth naturally, like you\'re not reading. Hold still.',
     prepMs: 1000,
     sampleMs: 3000,
@@ -1284,28 +1255,12 @@ const CALIBRATION_STEPS = [
   },
   {
     id: 'mutter',
-    label: 'Step 2 of 5 — Silent mouthing',
+    label: 'Step 2 of 3 — Silent mouthing',
     instruction: 'Silently mouth this sentence as if reading aloud, no need to make sound: ' +
       '"The quick brown fox jumps over the lazy dog."',
     prepMs: 1000,
     sampleMs: 4000,
     metric: 'mar'
-  },
-  {
-    id: 'facing',
-    label: 'Step 3 of 5 — Facing screen',
-    instruction: 'Look directly at the camera, like you\'re reading normally. Hold still.',
-    prepMs: 1000,
-    sampleMs: 3000,
-    metric: 'pose'
-  },
-  {
-    id: 'away',
-    label: 'Step 4 of 5 — Turned away',
-    instruction: 'Turn your head to where you\'d expect reading to pause, and hold it there.',
-    prepMs: 1000,
-    sampleMs: 3000,
-    metric: 'pose'
   },
   {
     id: 'rate',
@@ -1321,7 +1276,7 @@ const CALIBRATION_STEPS = [
     // Instruction says "twice" up front in the static text rather than via
     // a live prompt mid-run — deliberate, given prior testing showed live
     // reactive feedback here changes how naturally people mouth the words.
-    label: 'Step 5 of 5 — Your pace',
+    label: 'Step 3 of 3 — Your pace',
     instruction: 'At your own natural pace, silently mouth this sentence TWICE through, word by word, ' +
       'pausing briefly between words like normal reading: "' + SAMPLE_SENTENCE + '"',
     prepMs: 1500,
@@ -1444,7 +1399,7 @@ function computeRateProminenceThreshold() {
   return threshold;
 }
 
-function updateCalibration(mar, yaw, pitch) {
+function updateCalibration(mar) {
   const step = CALIBRATION_STEPS[calibration.stepIndex];
   const now = performance.now();
   const elapsed = now - calibration.phaseStartTime;
@@ -1481,7 +1436,7 @@ function updateCalibration(mar, yaw, pitch) {
     return;
   }
 
-  calibration.currentSamples.push({ mar, yaw, pitch });
+  calibration.currentSamples.push({ mar });
   const remaining = Math.max(0, step.sampleMs - elapsed);
   calibrationCountdownEl.textContent = `Hold it... ${Math.ceil(remaining / 1000)}`;
 
@@ -1723,17 +1678,12 @@ function fitDurationRegression(points) {
 function finishCalibration() {
   const neutralMar = average(calibration.results.neutral.map(s => s.mar));
   const mutterMar = average(calibration.results.mutter.map(s => s.mar));
-  const awayYaw = average(calibration.results.away.map(s => Math.abs(s.yaw)));
-  const awayPitch = average(calibration.results.away.map(s => Math.abs(s.pitch)));
-  const facingYaw = average(calibration.results.facing.map(s => Math.abs(s.yaw)));
-  const facingPitch = average(calibration.results.facing.map(s => Math.abs(s.pitch)));
 
   // Reject a run that couldn't have produced meaningful thresholds, rather
-  // than silently saving broken values. Two failure modes: mouth didn't
-  // move enough between neutral/mutter, or head didn't turn enough between
-  // facing/away.
+  // than silently saving broken values: mouth didn't move enough between
+  // neutral/mutter. (A second failure mode — head didn't turn enough
+  // between facing/away — existed here until Entry 45's head-pose removal.)
   const marGap = mutterMar - neutralMar;
-  const poseTurn = Math.max(awayYaw - facingYaw, awayPitch - facingPitch);
 
   if (marGap < MIN_MAR_GAP) {
     showCalibrationFailure(
@@ -1742,15 +1692,8 @@ function finishCalibration() {
     );
     return;
   }
-  if (poseTurn < MIN_POSE_THRESHOLD / 2) {
-    showCalibrationFailure(
-      'Not enough head movement between the facing and turned-away steps. ' +
-      'Try turning further away, then retry.'
-    );
-    return;
-  }
 
-  // Phase 11: third failure mode — the Speed step's captured word timings
+  // Phase 11: second failure mode — the Speed step's captured word timings
   // weren't usable for a regression. Two distinct causes get one combined
   // check each, same "reject don't silently save" pattern as the two checks
   // above.
@@ -1819,18 +1762,11 @@ function finishCalibration() {
   const closeThreshold = neutralMar + marGap * 0.33;
   const openThreshold = neutralMar + marGap * 0.67;
 
-  // Derived directly from the measured turn-away boundary, floored so a
-  // shallow turn (e.g. user only turned yaw, not pitch) can't produce an
-  // oversensitive threshold that trips on normal reading wobble.
-  const yawThreshold = Math.max(MIN_POSE_THRESHOLD, awayYaw);
-  const pitchThreshold = Math.max(MIN_POSE_THRESHOLD, awayPitch);
-
   // Phase 11: clamp the regression to a sane range before trusting it — a
   // technically-valid fit (passed the spread/count checks above) can still
-  // land somewhere unreasonable from noise in a short run. Same spirit as
-  // flooring yawThreshold/pitchThreshold above, just with a ceiling too
-  // since both directions (too twitchy / too sluggish a pace) are plausible
-  // failure shapes here, unlike the pose thresholds.
+  // land somewhere unreasonable from noise in a short run, so both a floor
+  // and a ceiling apply (too twitchy / too sluggish a pace are both
+  // plausible failure shapes).
   const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
   const msPerSyllablePersonal = clamp(fit.msPerSyllable, MIN_MS_PER_SYLLABLE, MAX_MS_PER_SYLLABLE);
   const baseWordMsPersonal = clamp(fit.baseWordMs, MIN_BASE_WORD_MS, MAX_BASE_WORD_MS);
@@ -1867,8 +1803,6 @@ function finishCalibration() {
   const data = {
     openThreshold,
     closeThreshold,
-    yawThreshold,
-    pitchThreshold,
     msPerSyllablePersonal,
     baseWordMsPersonal,
     personalizedRate,
@@ -1908,8 +1842,6 @@ function showCalibrationFailure(message) {
 function applyCalibration(data) {
   OPEN_THRESHOLD = data.openThreshold;
   CLOSE_THRESHOLD = data.closeThreshold;
-  YAW_THRESHOLD = data.yawThreshold;
-  PITCH_THRESHOLD = data.pitchThreshold;
 
   const when = new Date(data.calibratedAt).toLocaleString();
   calibrationStatusValueEl.textContent = `custom (calibrated ${when})`;
@@ -2263,9 +2195,9 @@ function onWordClick(wordIndex) {
   highlightWordAt(baseOffset);
   speechStateEl.textContent = 'waiting for mouth to open';
 
-  // If the mouth is already open and facing the screen at click time, don't
+  // If the mouth is already open and a face is visible at click time, don't
   // make the reader close-then-reopen their mouth just to kick things off.
-  if (mouthState === 'open' && isFacingScreen) {
+  if (mouthState === 'open' && isFaceVisible) {
     speakFrom(baseOffset);
   }
 }
@@ -2337,61 +2269,10 @@ function highlightWordAt(charIndex) {
 // space — i.e. the direction the face is pointing. We turn that forward vector
 // into two simple angles rather than doing a full Euler decomposition, since we
 // only care about "how far off is the face from pointing at the camera."
-function getYawPitch(matrixData) {
-  const fx = matrixData[8];
-  const fy = matrixData[9];
-  const fz = matrixData[10];
-
-  const yawRad = Math.atan2(fx, fz);
-  const pitchRad = Math.atan2(-fy, Math.sqrt(fx * fx + fz * fz));
-
-  return {
-    yaw: yawRad * (180 / Math.PI),
-    pitch: pitchRad * (180 / Math.PI)
-  };
-}
-
-function updateHeadPose(matrixData) {
-  const { yaw, pitch } = getYawPitch(matrixData);
-  yawValueEl.textContent = yaw.toFixed(1);
-  pitchValueEl.textContent = pitch.toFixed(1);
-
-  // See POSE_SMOOTHING_ALPHA's comment above. Display above stays raw (same
-  // convention as MAR: marValueEl always shows the raw instantaneous value,
-  // smoothing only applies to what decisions are made from) — lastYaw/
-  // lastPitch, which both the facing gate and computePoseTrouble() read,
-  // get the smoothed value.
-  smoothedYaw = smoothedYaw === null ? yaw : smoothedYaw + POSE_SMOOTHING_ALPHA * (yaw - smoothedYaw);
-  smoothedPitch = smoothedPitch === null ? pitch : smoothedPitch + POSE_SMOOTHING_ALPHA * (pitch - smoothedPitch);
-  lastYaw = smoothedYaw;
-  lastPitch = smoothedPitch;
-
-  const facing = Math.abs(smoothedYaw) < YAW_THRESHOLD && Math.abs(smoothedPitch) < PITCH_THRESHOLD;
-  if (facing === isFacingScreen) return; // no state change, nothing else to do
-
-  isFacingScreen = facing;
-  facingStateEl.textContent = isFacingScreen ? 'facing screen' : 'looking away';
-  // Phase 11b: a real gate trip is exactly the kind of hard-failure moment
-  // the sharp pulse cue is for (Entry 17 Q2) — fire it here rather than
-  // waiting for the slow ambient score to notice, since the gate trip is
-  // itself the event, not a gradual buildup.
-  if (!isFacingScreen && readingActive) {
-    maybeFireTroublePulse();
-  }
-  // Bug fix (Phase 7, Entry 11): speech is one continuous utterance (Phase 3),
-  // not per-word — it never "finishes naturally" at a word boundary. Looking
-  // away mid-utterance must actively stop it via the same cancel() path as a
-  // mouth-close, or it just keeps talking regardless of head pose. mouthState
-  // itself is left untouched here since the mouth may still be physically open.
-  if (!isFacingScreen) {
-    onMouthClosed();
-  } else if (mouthState === 'open') {
-    // Mirrors Phase 4's click-to-word pattern: if the mouth is already open
-    // when we come back to facing the screen, resume immediately rather than
-    // waiting for a fresh mouth-open edge that may never come.
-    onMouthOpen();
-  }
-}
+// getYawPitch()/updateHeadPose() removed Entry 45 — head-pose gating is
+// gone (Section 1's ALS-head-drop/lying-down reasoning; see the note above
+// isFaceVisible). facialTransformationMatrixes is no longer read anywhere
+// in this file.
 
 function getMAR(landmarks) {
   const upper = landmarks[UPPER_LIP];
@@ -2542,8 +2423,8 @@ function onMouthOpen() {
   // releases a stall, THIS call is that action landing — log which guard
   // (if any) makes it a no-op, so a stall can be traced to "the resume
   // never actually fired" vs. "it fired but resumed from the wrong place."
-  console.log(`[Phase 12d diag] onMouthOpen() | isFacingScreen=${isFacingScreen} readingActive=${readingActive} isSpeakingChunk=${isSpeakingChunk} resumeOffset=${baseOffset + lastBoundaryOffset}`);
-  if (!isFacingScreen) return; // gated: don't resume while looking away
+  console.log(`[Phase 12d diag] onMouthOpen() | isFaceVisible=${isFaceVisible} readingActive=${readingActive} isSpeakingChunk=${isSpeakingChunk} resumeOffset=${baseOffset + lastBoundaryOffset}`);
+  if (!isFaceVisible) return; // gated: don't resume while no face is detected (Phase 9b; head-pose gate removed Entry 45)
   if (!readingActive) return; // no active reading session
   if (isSpeakingChunk) return; // already flowing, nothing to do
 
@@ -2785,7 +2666,7 @@ startBtn.addEventListener('click', () => {
 
   // If the mouth is already open right when the button is clicked, start
   // speaking immediately from the beginning. Otherwise wait for mouth-open.
-  if (mouthState === 'open' && isFacingScreen) {
+  if (mouthState === 'open' && isFaceVisible) {
     speakFrom(0);
   }
 });
@@ -2839,8 +2720,10 @@ async function setup() {
       delegate: "GPU"
     },
     runningMode: "VIDEO",
-    numFaces: 1,
-    outputFacialTransformationMatrixes: true
+    numFaces: 1
+    // outputFacialTransformationMatrixes removed Entry 45 — only consumer
+    // was head-pose gating, which no longer exists. Skipping this output
+    // is a small free perf win per frame.
   });
 
   loadSavedCalibration();
@@ -2898,6 +2781,21 @@ function predictLoop() {
   if (results.faceLandmarks && results.faceLandmarks.length > 0) {
     noFaceSince = null; // Phase 9b: a face is visible again, clear the gap timer
 
+    // Phase 9b recovery, folded in here Entry 45: this used to happen inside
+    // updateHeadPose() (which ran regardless of facing state, so it always
+    // noticed a fresh face). With head-pose gating gone, this branch is now
+    // the only place a "face reappeared" transition is observed, so the
+    // recovery has to live here instead. Mirrors the old behavior: resume
+    // immediately if the mouth is already open, rather than waiting for a
+    // fresh open edge that may never come.
+    if (!isFaceVisible) {
+      isFaceVisible = true;
+      facingStateEl.textContent = 'face detected';
+      if (mouthState === 'open') {
+        onMouthOpen();
+      }
+    }
+
     const drawingUtils = new DrawingUtils(ctx);
     for (const landmarks of results.faceLandmarks) {
       drawingUtils.drawConnectors(
@@ -2917,49 +2815,29 @@ function predictLoop() {
     marValueEl.textContent = mar.toFixed(3);
 
     if (calibration.active) {
-      // During calibration we still want live yaw/pitch for this same frame,
-      // so pull it here rather than waiting for the block below (which is
-      // skipped once calibration owns the frame).
-      let yaw = 0, pitch = 0;
-      if (results.facialTransformationMatrixes && results.facialTransformationMatrixes.length > 0) {
-        const pose = getYawPitch(results.facialTransformationMatrixes[0].data);
-        yaw = pose.yaw;
-        pitch = pose.pitch;
-        yawValueEl.textContent = yaw.toFixed(1);
-        pitchValueEl.textContent = pitch.toFixed(1);
-      }
-      updateCalibration(mar, yaw, pitch);
+      updateCalibration(mar);
     } else {
       updateMouthState(mar);
     }
   } else {
     // Phase 9b: zero landmarks this frame — start (or continue) the gap
-    // timer. Once it's been missing long enough, treat it the same way a
-    // yaw/pitch threshold trip is treated: stop speech and flip the facing
-    // indicator, so a reader who's walked away or turned the camera off
-    // doesn't get talked at indefinitely. Guarded on isFacingScreen so this
-    // only fires once per gap, not every frame after the timeout — same
-    // idempotency shape as updateHeadPose's "facing === isFacingScreen ?
-    // return" early-out.
+    // timer. Once it's been missing long enough, stop speech and flip the
+    // face-detection indicator, so a reader who's walked away or turned the
+    // camera off doesn't get talked at indefinitely. Guarded on
+    // isFaceVisible so this only fires once per gap, not every frame after
+    // the timeout.
     if (noFaceSince === null) {
       noFaceSince = performance.now();
-    } else if (readingActive && isFacingScreen && (performance.now() - noFaceSince) >= NO_FACE_TIMEOUT_MS) {
-      isFacingScreen = false;
+    } else if (readingActive && isFaceVisible && (performance.now() - noFaceSince) >= NO_FACE_TIMEOUT_MS) {
+      isFaceVisible = false;
       facingStateEl.textContent = 'no face detected';
       maybeFireTroublePulse();
       onMouthClosed();
     }
   }
 
-  // Phase 3: head-pose gating, independent of whether lip landmarks were found
-  // above (facialTransformationMatrixes comes from the same detection pass).
-  // Skipped during calibration — updateCalibration() above already consumed
-  // this frame's pose data, and we don't want head-pose gating firing
-  // onMouthClosed()/onMouthOpen() mid-calibration since there's no active
-  // reading session for it to act on.
-  if (!calibration.active && results.facialTransformationMatrixes && results.facialTransformationMatrixes.length > 0) {
-    updateHeadPose(results.facialTransformationMatrixes[0].data);
-  }
+  // Phase 3's head-pose gating block (independent yaw/pitch check on every
+  // frame) removed Entry 45 — see the note above isFaceVisible.
 
   // Phase 9 (diagnostic): live "ago" readout, independent of onboundary itself
   // firing — this is the whole point, since a stalled boundary stream is
