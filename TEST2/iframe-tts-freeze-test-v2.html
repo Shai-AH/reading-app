@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mumblew — iframe TTS-freeze isolation test (max stress)</title>
+<style>
+  body {
+    background: #0D1417;
+    color: #EDEDE8;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    max-width: 860px;
+    margin: 24px auto;
+    padding: 0 20px 60px;
+    line-height: 1.5;
+  }
+  h1 { font-size: 18px; }
+  h2 { font-size: 15px; margin-top: 0; color: #2FBF9A; }
+  p.note { color: #9AA6A3; font-size: 13px; }
+  .panel {
+    background: #16221F;
+    border: 1px solid #26363A;
+    border-radius: 8px;
+    padding: 14px;
+    margin-top: 14px;
+  }
+  label { font-size: 13px; margin-right: 14px; display: inline-block; margin-bottom: 6px; }
+  input[type=number] { width: 60px; background: #1C2A27; color: #EDEDE8; border: 1px solid #35494E;
+    border-radius: 6px; padding: 4px 6px; font-size: 13px; }
+  input[type=checkbox] { margin-right: 6px; vertical-align: middle; }
+  button {
+    background: #1C2A27; color: #EDEDE8; border: 1px solid #35494E;
+    border-radius: 6px; padding: 6px 10px; font-size: 13px; font-family: inherit;
+    cursor: pointer; margin-right: 8px; margin-top: 4px;
+  }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button:hover:not(:disabled) { border-color: #2FBF9A; }
+  #status { font-size: 13px; color: #F0AC2E; margin-top: 10px; min-height: 18px; }
+  #log {
+    background: #0A0F11; border: 1px solid #26363A; border-radius: 8px;
+    padding: 10px; margin-top: 10px; font-family: monospace; font-size: 12.5px;
+    color: #C7D0CD; max-height: 460px; overflow-y: auto; white-space: pre-wrap;
+  }
+  .warn { color: #F0AC2E; }
+  .bad { color: #E36767; }
+  .good { color: #2FBF9A; }
+  video { display: none; }
+</style>
+</head>
+<body>
+
+<h1>Mumblew — iframe TTS-freeze isolation test (max stress, round 2)</h1>
+<p class="note">
+  The first version of this test (clean sequential calls, then interrupted-
+  but-orderly calls at a fixed 900ms) never reproduced a freeze in 30 calls,
+  unlike the real app's observed #10/#14/#17/#22 (Entry 24/33). This version
+  stacks every stressor available without touching the real app: real
+  MediaPipe camera inference running unthrottled in the background,
+  optional synthetic CPU load, randomized/faster interrupt timing, and an
+  <strong>overlapping "flutter" dispatch mode</strong> that fires the next
+  <code>speak()</code> on a fixed clock without waiting for the previous
+  call's <code>cancel()</code>/<code>onerror</code>/<code>onend</code> to
+  resolve first — the closest isolated analogue to Entry 16's original
+  "speak() called before the prior utterance settled" freeze mechanism.
+</p>
+<p class="note">
+  <strong>Run in Chrome. Reload the page between the control and iframe
+  tests</strong> — if the leak lives at the browser-process level rather
+  than per-frame, running both in one page load would let the control
+  test's calls poison the iframe test's result too.
+</p>
+
+<div class="panel">
+  <h2>0. Stressors (enable before running a test below)</h2>
+  <p class="note" style="margin-top:0;">
+    Both are optional and independent — MediaPipe is the most faithful
+    (it's literally what was running during the original observed freezes),
+    synthetic load doesn't need camera permission and is useful if MediaPipe
+    fails to load in this sandboxed context.
+  </p>
+  <div>
+    <button id="startMpBtn">Start MediaPipe camera load</button>
+    <button id="stopMpBtn" disabled>Stop MediaPipe load</button>
+    <span class="note">Runs face-landmark inference every animation frame, unthrottled (no Phase 7c idle throttling here) — matches the conditions under which Entry 24's freeze actually happened.</span>
+  </div>
+  <div style="margin-top:10px;">
+    <label><input type="checkbox" id="syntheticLoadCheckbox"> Synthetic CPU busy-load</label>
+    <label>Target ms busy-work per frame: <input type="number" id="syntheticLoadMs" value="25"></label>
+    <span class="note">Pure CPU stress, no camera needed — layer on top of or instead of MediaPipe.</span>
+  </div>
+  <video id="camVideo" autoplay playsinline muted></video>
+</div>
+
+<div class="panel">
+  <h2>1. Control — direct speak(), no recycling</h2>
+  <p class="note">
+    Baseline against whatever stressors are enabled above.
+  </p>
+  <label>Calls to attempt: <input id="controlCount" type="number" value="60"></label>
+  <label><input type="checkbox" id="controlFlutter" checked> Flutter mode (overlapping, no waiting)</label>
+  <br>
+  <button id="controlBtn">Run control test</button>
+</div>
+
+<div class="panel">
+  <h2>2. Iframe-recycle test</h2>
+  <p class="note">
+    Same calls, routed through a hidden same-origin iframe's own
+    <code>speechSynthesis</code>, destroyed and recreated every N calls
+    ahead of wherever the control test froze (if it did).
+  </p>
+  <label>Calls to attempt: <input id="iframeCount" type="number" value="60"></label>
+  <label>Recycle every: <input id="recycleEvery" type="number" value="8"></label>
+  <label><input type="checkbox" id="iframeFlutter" checked> Flutter mode (overlapping, no waiting)</label>
+  <br>
+  <button id="iframeBtn">Run iframe-recycle test</button>
+</div>
+
+<div id="status"></div>
+<pre id="log"></pre>
+
+<script type="module">
+import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+
+function log(msg, cls) {
+  const t = new Date().toLocaleTimeString();
+  const span = document.createElement('div');
+  if (cls) span.className = cls;
+  span.textContent = `[${t}] ${msg}`;
+  logEl.appendChild(span);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function setStatus(msg) { statusEl.textContent = msg; }
+
+// --- Stressor 1: real MediaPipe camera load, unthrottled -----------------
+const camVideo = document.getElementById('camVideo');
+const startMpBtn = document.getElementById('startMpBtn');
+const stopMpBtn = document.getElementById('stopMpBtn');
+
+let faceLandmarker = null;
+let mpRunning = false;
+let mpRafId = null;
+let mpFrameCount = 0;
+let mpLastFpsLog = 0;
+
+async function startMediaPipeLoad() {
+  startMpBtn.disabled = true;
+  setStatus('Loading MediaPipe + requesting camera...');
+  log('Loading MediaPipe face landmarker + requesting camera access...');
+  try {
+    const filesetResolver = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+    );
+    faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+      baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+        delegate: "GPU",
+      },
+      outputFaceBlendshapes: false,
+      outputFacialTransformationMatrixes: true,
+      runningMode: "VIDEO",
+      numFaces: 1,
+    });
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    camVideo.srcObject = stream;
+    await new Promise((resolve) => {
+      camVideo.onloadedmetadata = () => { camVideo.play(); resolve(); };
+    });
+    mpRunning = true;
+    mpFrameCount = 0;
+    mpLastFpsLog = performance.now();
+    log('MediaPipe load running — unthrottled inference every animation frame, matching the conditions of the original observed freezes.', 'warn');
+    predictLoopMp();
+    setStatus('MediaPipe load running.');
+    stopMpBtn.disabled = false;
+  } catch (err) {
+    log(`MediaPipe load FAILED: ${err.message}`, 'bad');
+    setStatus('MediaPipe load failed — see log. Synthetic CPU load is still available as a stressor.');
+    startMpBtn.disabled = false;
+  }
+}
+
+function predictLoopMp() {
+  if (!mpRunning) return;
+  if (faceLandmarker && camVideo.readyState >= 2) {
+    faceLandmarker.detectForVideo(camVideo, performance.now());
+    mpFrameCount++;
+  }
+  const now = performance.now();
+  if (now - mpLastFpsLog > 3000) {
+    const fps = (mpFrameCount / ((now - mpLastFpsLog) / 1000)).toFixed(1);
+    log(`  [mediapipe load] ~${fps} fps`, 'warn');
+    mpFrameCount = 0;
+    mpLastFpsLog = now;
+  }
+  mpRafId = requestAnimationFrame(predictLoopMp);
+}
+
+function stopMediaPipeLoad() {
+  mpRunning = false;
+  if (mpRafId) cancelAnimationFrame(mpRafId);
+  if (camVideo.srcObject) {
+    camVideo.srcObject.getTracks().forEach((t) => t.stop());
+    camVideo.srcObject = null;
+  }
+  stopMpBtn.disabled = true;
+  startMpBtn.disabled = false;
+  setStatus('MediaPipe load stopped.');
+  log('MediaPipe load stopped.');
+}
+
+startMpBtn.addEventListener('click', startMediaPipeLoad);
+stopMpBtn.addEventListener('click', stopMediaPipeLoad);
+
+// --- Stressor 2: synthetic CPU busy-load ----------------------------------
+const syntheticLoadCheckbox = document.getElementById('syntheticLoadCheckbox');
+const syntheticLoadMsInput = document.getElementById('syntheticLoadMs');
+let syntheticLoadRunning = false;
+
+function syntheticLoadFrame() {
+  if (!syntheticLoadRunning) return;
+  const targetMs = parseFloat(syntheticLoadMsInput.value) || 25;
+  const start = performance.now();
+  let x = 0.0001;
+  while (performance.now() - start < targetMs) {
+    x = Math.sin(x) * Math.cos(x) + Math.sqrt(Math.abs(x));
+  }
+  requestAnimationFrame(syntheticLoadFrame);
+}
+syntheticLoadCheckbox.addEventListener('change', () => {
+  syntheticLoadRunning = syntheticLoadCheckbox.checked;
+  if (syntheticLoadRunning) {
+    log(`Synthetic CPU load enabled (~${syntheticLoadMsInput.value}ms busy-work/frame).`, 'warn');
+    requestAnimationFrame(syntheticLoadFrame);
+  } else {
+    log('Synthetic CPU load disabled.');
+  }
+});
+
+// --- Speech test core ------------------------------------------------------
+// Fixed-length filler text, not read for content — deliberately similar
+// length to a real sentence so per-call timing is comparable to Entry 24/33's
+// live app numbers rather than a trivially short "hi".
+function testSentence(n) {
+  return `This is freeze test sentence number ${n}, spoken to check whether the engine is still responding normally under load.`;
+}
+
+// Interrupted with cancel() partway through, mirroring the app's real
+// mouth-close→cancel(), mouth-open→speak() pattern. A cancel()-triggered
+// onerror is the EXPECTED healthy outcome; only a full timeout with no
+// event at all is the actual freeze signature (Entry 23).
+function speakInterrupted(synthesisTarget, utteranceCtor, text, interruptAfterMs, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const u = new utteranceCtor(text);
+    u.rate = 1;
+    const t0 = performance.now();
+
+    const timeoutTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({ ok: false, reason: 'TIMEOUT — no onend/onerror fired after cancel()', elapsedMs: performance.now() - t0 });
+    }, timeoutMs);
+
+    const interruptTimer = setTimeout(() => {
+      try { synthesisTarget.cancel(); } catch (err) { /* handled via onerror/timeout */ }
+    }, interruptAfterMs);
+
+    u.onend = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      clearTimeout(interruptTimer);
+      resolve({ ok: true, elapsedMs: performance.now() - t0 });
+    };
+    u.onerror = (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      clearTimeout(interruptTimer);
+      resolve({ ok: true, reason: `onerror (expected from interrupt): ${e.error}`, elapsedMs: performance.now() - t0 });
+    };
+    try {
+      synthesisTarget.speak(u);
+    } catch (err) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      clearTimeout(interruptTimer);
+      resolve({ ok: false, reason: `speak() threw: ${err.message}`, elapsedMs: performance.now() - t0 });
+    }
+  });
+}
+
+// Generous under load — real inference contention can legitimately slow
+// event firing; only a wait past this counts as a freeze rather than a
+// slow tick, per Entry 23's "events stop firing entirely" signature.
+const TIMEOUT_MS = 12000;
+
+// Randomized 150-1100ms interrupt delay — faster and more erratic than a
+// calm reading cadence, simulating jittery real-world mouth-open/close
+// detection rather than one clean fixed interval.
+function randomInterruptDelay() {
+  return 150 + Math.random() * 950;
+}
+
+// --- Orderly mode: waits for each call to fully resolve before the next ---
+async function runOrderlyLoop({ getTarget, getCtor, count, onBeforeCall, logPrefix }) {
+  let firstFreezeAt = null;
+  for (let i = 1; i <= count; i++) {
+    if (onBeforeCall) await onBeforeCall(i);
+    const result = await speakInterrupted(getTarget(), getCtor(), testSentence(i), randomInterruptDelay(), TIMEOUT_MS);
+    if (result.ok) {
+      const tag = result.reason ? ` (${result.reason})` : '';
+      log(`${logPrefix}call ${i}/${count}: ok, ${result.elapsedMs.toFixed(0)}ms${tag}`);
+    } else {
+      log(`${logPrefix}call ${i}/${count}: FAILED — ${result.reason} (waited ${result.elapsedMs.toFixed(0)}ms)`, 'bad');
+      firstFreezeAt = i;
+      log(`${logPrefix}stopping — matches Entry 24's finding that a freeze is unrecoverable for the rest of the session.`, 'warn');
+      break;
+    }
+  }
+  return firstFreezeAt;
+}
+
+// --- Flutter mode: dispatches on a fixed clock WITHOUT waiting for the ----
+// previous call to resolve — new speak() calls can land while a prior one
+// is still mid-interrupt. This is deliberately the "impatient" pattern
+// Entry 16 warned about (speak() landing before the prior utterance
+// settled), reproduced via a timer instead of chaining off onend directly.
+function runFlutterLoop({ getTarget, getCtor, count, onBeforeDispatch, logPrefix, dispatchIntervalMs = 450 }) {
+  return new Promise((resolve) => {
+    let dispatched = 0;
+    let resolved = 0;
+    let firstFreezeAt = null;
+    let stopped = false;
+    let timer = null;
+
+    async function dispatchNext() {
+      if (stopped || dispatched >= count) return;
+      const i = ++dispatched;
+      if (onBeforeDispatch) await onBeforeDispatch(i);
+      const target = getTarget();
+      const ctor = getCtor();
+      const t0 = performance.now();
+      speakInterrupted(target, ctor, testSentence(i), randomInterruptDelay(), TIMEOUT_MS).then((result) => {
+        resolved++;
+        if (result.ok) {
+          const tag = result.reason ? ` (${result.reason})` : '';
+          log(`${logPrefix}call ${i}/${count}: ok, ${result.elapsedMs.toFixed(0)}ms${tag}`);
+        } else if (!stopped) {
+          log(`${logPrefix}call ${i}/${count}: FAILED — ${result.reason} (waited ${result.elapsedMs.toFixed(0)}ms)`, 'bad');
+          firstFreezeAt = i;
+          stopped = true;
+          log(`${logPrefix}stopping dispatch — freeze detected, matches Entry 24's unrecoverable-for-session finding.`, 'warn');
+          clearInterval(timer);
+          resolve(firstFreezeAt);
+        }
+        if (!stopped && dispatched >= count && resolved >= count) {
+          clearInterval(timer);
+          resolve(firstFreezeAt);
+        }
+      });
+    }
+
+    dispatchNext();
+    timer = setInterval(() => {
+      dispatchNext();
+      if (dispatched >= count) clearInterval(timer);
+    }, dispatchIntervalMs);
+  });
+}
+
+// --- Test 1: control ------------------------------------------------------
+const controlBtn = document.getElementById('controlBtn');
+const controlCountInput = document.getElementById('controlCount');
+const controlFlutterCheckbox = document.getElementById('controlFlutter');
+
+controlBtn.addEventListener('click', async () => {
+  controlBtn.disabled = true;
+  const count = parseInt(controlCountInput.value, 10) || 60;
+  const flutter = controlFlutterCheckbox.checked;
+  log(`--- Control test starting: ${count} calls, mode=${flutter ? 'FLUTTER (overlapping)' : 'orderly'} ---`);
+  setStatus('Running control test...');
+  const getTarget = () => window.speechSynthesis;
+  const getCtor = () => SpeechSynthesisUtterance;
+  const freezeAt = flutter
+    ? await runFlutterLoop({ getTarget, getCtor, count, logPrefix: '  [control] ' })
+    : await runOrderlyLoop({ getTarget, getCtor, count, logPrefix: '  [control] ' });
+  if (freezeAt === null) {
+    log(`Control summary: all ${count} calls completed normally, no freeze observed in this run.`, 'good');
+  } else {
+    log(`Control summary: froze at call #${freezeAt}.`, 'bad');
+  }
+  setStatus('Control test done. Reload the page before running the iframe test.');
+  controlBtn.disabled = false;
+});
+
+// --- Test 2: iframe-recycle -----------------------------------------------
+const iframeBtn = document.getElementById('iframeBtn');
+const iframeCountInput = document.getElementById('iframeCount');
+const recycleEveryInput = document.getElementById('recycleEvery');
+const iframeFlutterCheckbox = document.getElementById('iframeFlutter');
+
+let currentIframe = null;
+
+function spawnFreshIframe() {
+  if (currentIframe) {
+    currentIframe.remove();
+    currentIframe = null;
+  }
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  iframe.srcdoc = '<!DOCTYPE html><html><body></body></html>';
+  document.body.appendChild(iframe);
+  currentIframe = iframe;
+  return new Promise((resolve) => {
+    iframe.addEventListener('load', () => resolve(iframe), { once: true });
+  });
+}
+
+iframeBtn.addEventListener('click', async () => {
+  iframeBtn.disabled = true;
+  const count = parseInt(iframeCountInput.value, 10) || 60;
+  const recycleEvery = parseInt(recycleEveryInput.value, 10) || 8;
+  const flutter = iframeFlutterCheckbox.checked;
+  log(`--- Iframe-recycle test starting: ${count} calls, recycling every ${recycleEvery}, mode=${flutter ? 'FLUTTER (overlapping)' : 'orderly'} ---`);
+  setStatus('Running iframe-recycle test...');
+
+  await spawnFreshIframe();
+  log(`  [iframe] spawned initial iframe.`);
+
+  const onBeforeDispatch = async (i) => {
+    if (i > 1 && (i - 1) % recycleEvery === 0) {
+      await spawnFreshIframe();
+      log(`  [iframe] recycled before call ${i} (fresh iframe + fresh speechSynthesis instance).`);
+    }
+  };
+  const getTarget = () => currentIframe.contentWindow.speechSynthesis;
+  const getCtor = () => currentIframe.contentWindow.SpeechSynthesisUtterance;
+
+  const freezeAt = flutter
+    ? await runFlutterLoop({ getTarget, getCtor, count, onBeforeDispatch, logPrefix: '  [iframe] ' })
+    : await runOrderlyLoop({ getTarget, getCtor, count, onBeforeCall: onBeforeDispatch, logPrefix: '  [iframe] ' });
+
+  if (freezeAt === null) {
+    log(`Iframe-recycle summary: all ${count} calls completed normally, no freeze observed in this run.`, 'good');
+    log(`If the control test froze earlier than this count, that's a real positive signal for the recycling approach.`, 'good');
+  } else {
+    log(`Iframe-recycle summary: froze at call #${freezeAt} despite recycling every ${recycleEvery} calls.`, 'bad');
+    log(`This suggests the leak isn't reset by destroying the frame — likely lives below the per-frame JS binding (browser-process TTS service), not fixable by this technique.`, 'bad');
+  }
+  setStatus('Iframe test done.');
+  iframeBtn.disabled = false;
+});
+
+log('Ready. Optionally start stressors above, then run the control test, note the freeze call number, RELOAD THE PAGE, then run the iframe test.');
+</script>
+</body>
+</html>

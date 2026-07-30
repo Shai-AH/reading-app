@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Mumblew — Phase 13.5 Concurrent-Load Benchmark</title>
+<style>
+  :root {
+    --bg: #0b1114;
+    --panel: #131c20;
+    --border: #24343a;
+    --text: #e6f0ef;
+    --dim: #93a7ac;
+    --accent: #4fc9c0;
+    --warn: #e0a04f;
+    --bad: #e0654f;
+    --good: #6fd08a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 24px 16px 60px;
+    line-height: 1.5;
+  }
+  h1 { font-size: 1.3rem; margin-bottom: 2px; }
+  .sub { color: var(--dim); font-size: 0.9rem; margin-bottom: 20px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    margin-bottom: 16px;
+  }
+  .panel h2 { font-size: 1rem; margin: 0 0 10px; color: var(--accent); }
+  label { display: block; font-size: 0.85rem; color: var(--dim); margin: 10px 0 4px; }
+  select, button {
+    background: #0f171a;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 0.9rem;
+  }
+  button {
+    background: var(--accent);
+    color: #06201d;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    margin-top: 14px;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary {
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    font-weight: 500;
+  }
+  video { width: 240px; border-radius: 8px; border: 1px solid var(--border); display: block; margin-top: 10px; }
+  #log {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.8rem;
+    white-space: pre-wrap;
+    background: #0a1012;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    max-height: 220px;
+    overflow-y: auto;
+    color: var(--dim);
+  }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); font-weight: 500; }
+  .verdict {
+    font-weight: 600;
+    padding: 10px 12px;
+    border-radius: 8px;
+    margin-top: 12px;
+  }
+  .verdict.good { background: rgba(111,208,138,0.12); color: var(--good); }
+  .verdict.warn { background: rgba(224,160,79,0.12); color: var(--warn); }
+  .verdict.bad { background: rgba(224,101,79,0.12); color: var(--bad); }
+  .hint { color: var(--dim); font-size: 0.8rem; margin-top: 6px; }
+  code { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<h1>Phase 13.5 — Concurrent-Load Benchmark</h1>
+<div class="sub">
+  Standalone test harness. Does not touch <code>main.js</code> / <code>index.html</code>.
+  Measures MediaPipe FaceLandmarker frame timing alone, then with Kokoro TTS
+  WASM inference running concurrently, on this device.
+</div>
+
+<div class="panel">
+  <h2>1. Setup</h2>
+  <label for="dtype">Kokoro model precision (affects size/speed — worth comparing on low-end hardware)</label>
+  <select id="dtype">
+    <option value="q8" selected>q8 (recommended default — smallest/fastest, some quality loss)</option>
+    <option value="fp16">fp16 (balance)</option>
+    <option value="fp32">fp32 (full precision, largest/slowest)</option>
+    <option value="q4">q4 (smallest, most quality loss)</option>
+  </select>
+
+  <label for="duration">Phase duration (each of baseline + concurrent runs this long)</label>
+  <select id="duration">
+    <option value="10000">10 seconds (quick check)</option>
+    <option value="15000" selected>15 seconds (recommended)</option>
+    <option value="30000">30 seconds (thorough)</option>
+  </select>
+
+  <button id="startBtn">Start Benchmark</button>
+  <div class="hint">
+    First run downloads the Kokoro model (tens–hundreds of MB depending on
+    precision) — cached by the browser after. Run via
+    <code>python3 serve.py</code> in this folder (not <code>npx serve</code> —
+    it sets the COOP/COEP headers WASM threading needs) and open
+    <code>http://localhost:8000/benchmark.html</code>. Opening the file
+    directly (<code>file://</code>) won't work — ES module imports need CORS.
+    Kokoro runs in a Worker (<code>kokoro-worker.js</code>), off the main
+    thread, so its compute can't block the MediaPipe loop being measured.
+  </div>
+
+  <video id="webcam" autoplay playsinline muted></video>
+</div>
+
+<div class="panel">
+  <h2>2. Progress</h2>
+  <div id="log">Waiting to start…</div>
+</div>
+
+<div class="panel" id="resultsPanel" style="display:none;">
+  <h2>3. Results</h2>
+  <table id="resultsTable"></table>
+  <div id="verdict"></div>
+  <button class="secondary" id="exportBtn">Copy results as JSON</button>
+  <div class="hint">Paste the JSON back into chat and we'll fold it into Phase 13.5's decision.</div>
+</div>
+
+<script type="module" src="benchmark.js"></script>
+</body>
+</html>

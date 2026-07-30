@@ -1,43 +1,46 @@
 # PROGRESS LOG — "Mumblew" (reading app)
-Last updated: July 25, 2026 (Entry 31)
+Last updated: July 29, 2026 (Entry 43)
 
 > HOW TO USE: Single source of truth. Claude reads this first in every new chat.
 > Update before ending each session. If Claude contradicts this file, trust this file.
 > Section 6 stays terse — grouped summary lines for older work, one line per recent
 > entry. Real decisions/reasoning live in Section 3.
-> **Trimmed Entry 23** to control file size (was 600+ lines): verbose tuning
-> narratives for fully-shipped, validated phases were cut down to their settled
-> conclusions; all still-open items were kept in full. Keep future additions lean —
-> conclusions and current values, not blow-by-blow attempt logs, once a phase closes.
+> **This pass (Entry 43):** Phase 9a is now resolved/shipped (speaking-poll fix +
+> Fix 3c/3c-2 gating + tab-visibility fix, deploy recommended) — its entire
+> multi-entry investigation narrative (Entries 22-24, 33, 39, 40) is collapsed to
+> settled conclusions in Section 3/3c and the roadmap; none of the blow-by-blow
+> (iframe freeze-test attempts, sentence-chunking reverts, EMA-tremor tuning,
+> broken test-harness iterations) is preserved beyond what's needed to explain
+> current code. Also trimmed: Phase 10a/10c/10d and 11/11b/12a/12c/12d detail,
+> long-closed and unlikely to need revisiting, down to shipped-facts only. Kept in
+> full: anything still open (head-pose removal decision, voice-quality plan,
+> Phase 13/13.5/13.6/14/15, PWA). Keep future additions lean — conclusions and
+> current values, not attempt logs, once something closes or settles.
 
 ---
 
 ## 1. The Idea (Owner: student)
 
-**Name: Mumblew** (Entry 27). Student has a logo already.
-
-Privacy-first app: reads/listens to text using quiet mouth movement (subvocalization)
-as the pacing signal, narrating via TTS driven by webcam lip-tracking instead of
-buttons/timers.
+**Name: Mumblew.** Privacy-first app: reads/listens to text using quiet mouth
+movement (subvocalization) as the pacing signal, narrating via TTS driven by
+webcam lip-tracking instead of buttons/timers.
 
 Audiences: reading in the dark/bed without light/sound (**lying down is a real,
-expected use case, not an edge case — Entry 23**); neurodivergent/low-focus readers
-needing active engagement; people who can move their mouth but can't vocalize (ALS,
-severe stutter, vocal cord paralysis) — assistive/humanitarian use case.
+expected use case, not an edge case**); neurodivergent/low-focus readers needing
+active engagement; people who can move their mouth but can't vocalize (ALS,
+severe stutter, vocal cord paralysis) — assistive/humanitarian use case. This
+last point is why the app avoids relying on buttons/taps as a control mechanism
+wherever possible (see Entry 43, head-pose gating decision).
 
-Three-state design: **State 1** (core, done) mouth movement = play/pace signal, text
-is known ground truth. **State 3** (done) click-to-word manual resync. **State 2**
-(done) cadence-based pacing informs pacing/close sensitivity.
+Three-state design: **State 1** (core, done) mouth movement = play/pace signal,
+text is known ground truth. **State 3** (done) click-to-word manual resync.
+**State 2** (done) cadence-based pacing informs pacing/close sensitivity.
 
 Privacy goal: on-device/local-first (MediaPipe), video never leaves device.
 
-Nice-to-haves (Phase 8b/8c, not started): voice cloning, offline mode.
-
 **ALS/paralysis audience (research-backed, Entry 17):** viable for early/moderate
-bulbar ALS and vocal-cord paralysis with preserved oral-motor control (early-stage
-shows *larger* compensatory jaw movement — a good detection signal). NOT viable for
-late-stage bulbar ALS — biological ceiling (patients shift to eye-tracking/AAC), not
-a design gap.
+bulbar ALS and vocal-cord paralysis with preserved oral-motor control. NOT viable
+for late-stage bulbar ALS — biological ceiling, not a design gap.
 
 ## 2. Person's context
 
@@ -46,540 +49,384 @@ a design gap.
 - **Timeline:** flexible, rough target Dec 2026.
 - Claude = architecture lead ("captain"); student executes ("navigator").
 - **Working style:** wait for explicit "start"/"next". Ask before updating the log;
-  proactively suggest updating if a chat runs long. New chat per phase from Phase 9
-  onward — this file carries context across that boundary, keep it accurate and lean.
+  proactively suggest updating if a chat runs long.
 - **Deploy reminder:** Claude proactively asks about deploy status at the end of any
   phase touching `main.js`/`index.html`.
-- **Cross-device discipline (Entry 23):** target platforms are laptop, mobile
-  (portrait + landscape), tablets/iPads. Any fix aimed at one platform must be
-  checked for regressions on the others before being considered done — don't let a
-  mobile fix silently break laptop behavior that already works. **Entry 24 result:**
-  this discipline caught a real problem — a mobile-motivated fix (9a) broke laptop
-  worse than the mobile bug it was meant to solve. Fully reverted as a result.
+- **Testing requests:** clear numbered step-by-step instructions (what to click,
+  what to watch, what to note down) — never a vague "try it and see." Student wants
+  MORE tests, not fewer; err toward thorough over quick.
+- **Bug-confirmation policy:** before asking the student to test a suspected
+  bug/fix in the real app, first build a standalone, isolated test page that tries
+  to confirm or rule out the specific mechanism. Only fall back to testing inside
+  the real app if the isolated version can't reproduce the thing being tested (or,
+  per Entry 43, the mechanism genuinely requires live mouth-tracking to test —
+  gating/cadence tuning falls in this category and gets diagnostic-instrumented
+  live testing instead, same as Entry 23's original approach).
+  **Corollary (Entry 41, learned the hard way):** an isolated harness is itself
+  code and can have its own bugs (a bad pre-trial nudge, too-short timeouts) that
+  produce misleading "stuck" results — verify the harness's own logic/timeouts
+  are sound (e.g. does a long utterance actually get enough time to finish at
+  natural speech rate?) before trusting a "reproduced" or "clean" result from it.
+- **Cross-device discipline:** target platforms are laptop, mobile (portrait +
+  landscape), tablets/iPads. Any fix aimed at one platform must be checked for
+  regressions on the others before being considered done.
 
 ## 3. Key decisions
 
 - Web app, Chrome-first. Stack: MediaPipe Face Landmarker (in-browser), Web Speech
   API TTS, Vercel hosting. No build tools — plain HTML/JS + `<script type="module">`,
   MediaPipe via jsdelivr CDN. Landmarks used: 13/14 (lips), 61/291 (mouth corners).
-- **Speech architecture:** `speak()`/`cancel()` only, never `pause()`/`resume()`
-  (caused a permanent Edge/Windows TTS freeze — confirmed, don't re-investigate
-  unless Edge support is ever added to scope). One utterance runs while the mouth
-  stays open; `cancel()` on close, remembering the last completed word (`onboundary`
-  char offset) to resume from.
-  **Confirmed broken on mobile Chrome (Entry 22-23): `onboundary` never fires at all
-  on mobile (not just unreliable — 0 events across full utterances), and `cancel()`
-  doesn't reliably trigger `onend` either — audio can keep playing well after
-  `cancel()` is called, unsupervised.** This single root cause explains three
-  separate mobile symptoms: the click-to-word "sticky" resume bug, mouth-close
-  overshoot, and the Phase 11b trouble border staying pinned/blinking.
-  **Phase 9a attempted and reverted (Entry 24) — shelved as unsolved, not just "not
-  yet built."** Built: bounded each utterance to one sentence (`findSentenceEnd()`)
-  instead of all remaining text, so a `cancel()` overrun would be capped. First
-  version auto-continued into the next sentence from inside `onend` when the mouth
-  was still open — this reproduced Entry 16's freeze (`speak()` called off a
-  previous utterance's `onend`) even though it was routed through `onMouthOpen()`'s
-  normal gating; the browser doesn't care which function triggers it. Reverted that
-  part — natural chunk completion only updates the resume point and waits for a
-  genuine fresh mouth-open/click, never calls `speak()` itself. **Still froze on
-  laptop**, mid-sentence, unrecoverable by any mouth action for the rest of the
-  session (confirmed live: audio silent, `onboundary` stuck at 3 events, cadence
-  blown out ~10x, no recovery via mouth tricks or clicking a different word). Root
-  cause: Entry 16's warning wasn't only about *chained* `speak()` calls specifically
-  — it's repeated `speak()` calls generally within one session that wedge
-  Chromium's engine. Sentence-chunking raises call frequency across a reading
-  session a lot (was ~1 `speak()` per manual resume across the whole text; became
-  ~1 per sentence encountered), enough on its own to hit the same ceiling even
-  through the fully explicit, non-chained, mouth-open-only path. **Fully reverted
-  `main.js` to pre-9a (one utterance per manual resume) — confirmed stable again.**
-  This is a real platform ceiling in the Web Speech API, not an implementation bug;
-  a fix needs a different bounding mechanism entirely (or accepting the ceiling and
-  solving overrun another way) — needs a dedicated session, not a quick patch.
-  Mobile remains affected by the original three symptoms, untouched since revert.
-- **No-face-detected safety gap (Phase 9b) — fixed and tested, Entry 24. Closed, no
-  open flags.** `predictLoop()` tracks a gap timer (`NO_FACE_TIMEOUT_MS=500`) when
-  MediaPipe returns zero landmarks; past the timeout during an active reading
-  session it trips the facing gate the same way a yaw/pitch threshold trip does
-  (`onMouthClosed()`, trouble pulse, indicator text). Recovery is free —
-  `updateHeadPose()`'s existing resume-on-return logic picks it up once a face
-  reappears, no duplicate code needed. Passed a full extreme-case test pass:
-  correct resume word after a mid-sentence camera-cover, no false-trip on a
-  sub-500ms wave-across, clean behavior across rapid cover/uncover, silent no-op
-  when mouth was already closed, a long (10-15s) cover held stable, trouble-pulse
-  fires on trip. One accepted cosmetic quirk, not a bug: if the yaw/pitch gate
-  already tripped ("looking away") and the camera is then also covered, the label
-  stays "looking away" rather than switching to "no face detected" —
-  `isFacingScreen` is already `false` so the label-setting branch doesn't run.
-  Harmless since speech is already stopped either way; low priority to special-case
-  if ever revisited.
-- **Head-pose gating:** yaw/pitch from MediaPipe's `facialTransformationMatrix`
-  (`DEFAULT_YAW_THRESHOLD=26°`, `DEFAULT_PITCH_THRESHOLD=21°`, overridable per-device
-  by the Phase 7b wizard). Gates the mouth signal and actively stops/resumes speech
-  on facing-state change.
-  **EMA-smoothed as of Entry 23** (`POSE_SMOOTHING_ALPHA=0.2`, unvalidated starting
-  guess): raw per-frame yaw/pitch was fine on a stationary laptop, but a handheld
-  phone's hand tremor reads as false head rotation (yaw/pitch are camera-relative —
-  can't otherwise distinguish tremor from real movement). On-screen display stays
-  raw; only the values feeding the facing gate and trouble score are smoothed.
-  Fixed mobile gating oversensitivity and (partly — see Phase 9a) the trouble
-  border.
-  **One pose issue still open (Entry 23), not yet fixed:**
-  - **(9c) Off-axis calibration doesn't hold across reading postures:** thresholds
-    calibrated sitting upright, camera centered. Lying down (a real target-audience
-    use case) shifts the face's position in-frame in a way that seems to affect
-    yaw/pitch beyond genuine head-angle change — student had real difficulty
-    registering "facing screen" while lying down. Not yet root-caused. May connect
-    conceptually to Phase 13 (recalibration robustness), which is about distance
-    drift rather than off-axis position — worth checking whether it's the same
-    underlying gap once investigated. **Set aside alongside 9a for now (Entry 24)
-    — not pursuing mobile/pose-edge-case work further right now.**
+
+- **Speech architecture — RESOLVED, ready to deploy (Entry 40-42).** `speak()`/
+  `cancel()` only, never `pause()`/`resume()` (permanent Edge/Windows TTS freeze,
+  confirmed, don't re-investigate unless Edge is ever in scope). One utterance runs
+  while the mouth stays open; `cancel()` on close, resuming from the last completed
+  word (`onboundary` char offset). Settled facts from the full 9a investigation
+  (Entries 22-24, 33, 39, 40 — narrative collapsed, only conclusions kept):
+  - Sentence-chunked utterances are a real Web Speech API ceiling on this
+    browser (raises `speak()`-call frequency past Chromium's tolerance,
+    session-cumulative, not mobile-exclusive) — reverted, not revisited without
+    a fundamentally different mechanism.
+  - `onend` never fires after a manual `cancel()` on this browser (confirmed via
+    isolated testing) — **fixed**: `main.js` now polls `speechSynthesis.speaking`
+    (20ms tick) instead, which also fixed a dormant bug where natural text
+    completion never called `finishReading()` (that path only ever ran through
+    the dead `onend` event). `onend` stays wired as a harmless fallback and does
+    fire correctly on natural completion (confirmed, Entry 41) — it's
+    specifically post-`cancel()` firing that's broken.
+  - The mid-word overshoot bug was cadence-gating logic (a flat average-duration
+    switch that stalled most real words), not a browser bug. **Fixed** by Fix
+    3c/3c-2: tight gating only within `RISK_WINDOW_HALF_MS=120` ms of an
+    estimated lip-closing-consonant (`b`/`m`/`p`, any position including word-
+    initial) moment; loose everywhere else. See `estimateRiskyConsonantTimings()`
+    / `isWithinRiskyWindow()` / `currentWordRiskyTimings` in `main.js`.
+  - **Entry 41 — isolated re-test of the "premature finishReading" theory
+    (suspected spurious single-tick `false` blip in the `speaking` poll) found
+    no evidence** across a genuinely long (186-word), natural, uninterrupted
+    utterance (3 clean completed trials, 0 blips, `onend` fired correctly each
+    time). Combined with the student's own live report (caught once, ever, and
+    possibly a calibration artifact), this is being treated as a rare glitch,
+    not a structural bug — **decision: stop chasing it, ship as-is, revisit only
+    if it recurs with real data attached.**
+  - **Entry 41 — live re-test of Fix 3c/3c-2 (15 back-to-back runs of a
+    paragraph that previously triggered sticky words) found zero sticky words.**
+    A new debug-panel row + console log (`[Fix 3c/3c-2 diag]`, shows whether a
+    detected close was inside/outside the risky window and its ms delta from
+    the nearest estimated risky moment) was added for future monitoring — no
+    behavior change, kept live. **Decision: consider this closed-enough to
+    ship; if it recurs in normal use, the new diagnostic gives exact tuning
+    data without needing another dedicated test session.**
+  - **Entry 42 — new bug found and fixed: tab/window visibility safety gap.**
+    `predictLoop()` only runs via `requestAnimationFrame`, which browsers
+    throttle or fully suspend once the tab/window is backgrounded (switching to
+    a different application backgrounds Chrome harder than switching tabs).
+    Since every mouth/face safety check (head-pose gating, the no-face timeout,
+    ordinary mouth-close detection) depends on `predictLoop` running,
+    backgrounding the tab silently stopped all of them while `speechSynthesis`
+    — which has no such throttling — kept talking. **Fixed** via a
+    `document.visibilitychange` listener (works independent of `predictLoop`):
+    on hidden, stops speech immediately and forces `mouthState = 'closed'` so a
+    stale "still open" reading can't cause a blind resume; on visible again,
+    deliberately does NOT auto-resume — waits for a fresh real mouth-open
+    detection, same recovery pattern already used for looking-away recovery.
+    Live-tested and confirmed working by student.
+  - **Current status: main.js/index.html have NOT yet been deployed to Vercel.**
+    All three fixes above (speaking-poll, Fix 3c/3c-2, tab-visibility) are live
+    in the local files and tested; deploy is the next action, pending student.
+  - Diagnostics still live and harmless, kept for monitoring: duplicate-boundary
+    counter, early-close counter, session-wide `speak()` counter, iframe-recycle
+    count (`IFRAME_TTS_RECYCLE_ENABLED=true`, recycles every 6 calls — the
+    freeze this targeted is now understood to have been the `onend`/gating bugs
+    above, not something the iframe swap itself fixed or broke; left enabled
+    since it's neutral-to-positive and removing it isn't worth the churn right
+    now), the new Fix-3c/3c-2 risky-window row.
+
+- **Local TTS parallelism — ruled out (Entry 38).** Dual-worker Kokoro synthesis
+  costs ~2x per worker under concurrent load (GPU contention on this hardware,
+  confirmed after fixing a buffer-depth test-harness bug) — no net throughput
+  gain from splitting work across two workers.
+
+- **No-face-detected safety gap (Phase 9b) — fixed, tested, closed.**
+  `predictLoop()` tracks a gap timer (`NO_FACE_TIMEOUT_MS=500`); past the
+  timeout during an active session it trips the facing gate the same way a
+  yaw/pitch trip does. Passed a full extreme-case test pass. Note: this only
+  covers "camera sees no face while the tab is visible and predictLoop is
+  running" — see Entry 42 above for the separate tab-backgrounding gap this
+  didn't cover.
+
+- **Head-pose gating — REMOVAL DECIDED (Entry 43), not yet built.** Current
+  implementation: yaw/pitch from MediaPipe's `facialTransformationMatrix`
+  (`DEFAULT_YAW_THRESHOLD=26°`, `DEFAULT_PITCH_THRESHOLD=21°`, EMA-smoothed,
+  `POSE_SMOOTHING_ALPHA=0.2`, overridable per-device via the calibration
+  wizard), gates the mouth signal and stops/resumes speech on facing-state
+  change. **Reasoning for removal:** yaw/pitch is camera-relative with no way
+  to distinguish "genuinely looking away" from "camera's at an odd angle
+  because I'm lying down" — and lying down is an explicitly core use case
+  (Section 1), not an edge case. Phase 9c (off-axis/lying-down calibration
+  breaking down) was never root-caused across two sessions of attempts, and
+  the student's own broader live experience is that it's oversensitive to
+  ordinary position changes generally, not just lying down — this reads as a
+  sensing-model limitation, not a tuning gap. Rather than adding a manual
+  pause button as a replacement (student's alternate proposal), the plan is to
+  simply rely on the already-core, already-buttonless mouth-movement signal
+  (State 1) as the sole pacing control — closing your mouth already pauses
+  reading; a tap-to-pause button would reintroduce exactly the kind of barrier
+  the mouth-signal design exists to avoid for the ALS/paralysis audience.
+  **Scope once built:** remove yaw/pitch thresholds, EMA smoothing, the
+  facing/turned-away calibration wizard steps; keep neutral+mutter(+speed)
+  steps. This makes 9c moot (nothing left to root-cause).
+  **Relationship to Phase 13 (distance calibration, Entry 43):** separate
+  concern (MAR/mouth-geometry drift vs. head-angle) — removing pose gating
+  doesn't fix Phase 13, but it does remove a confound (a future "stuck" moment
+  can no longer be caused by bad pose thresholds), making Phase 13 easier to
+  isolate and diagnose whenever it's picked up.
+
 - **Cadence-based pacing:** `estimateWordDuration(word) = BASE_WORD_MS +
   syllables * MS_PER_SYLLABLE` (defaults 120/220), personalized per-user via the
-  Phase 11 wizard (regression fit from a mouthed sample sentence). Dynamically
-  scales the mouth-close-detection threshold (stricter under expected time, looser
-  past it — `CADENCE_UNDER_FACTOR=0.6`/`CADENCE_OVER_FACTOR=1.5` on
-  `STOPPED_RANGE_THRESHOLD=0.03`). **Confirmed via live mobile testing (Entry 23)
-  this is NOT the cause of the mouth-overshoot bug** — detection gap measured
-  healthy (~330ms, in line with the `WINDOW_MS=300` movement-range buffer).
-  **Clamp-bounds bug fixed Entry 23:** old bounds (`MIN_MS_PER_SYLLABLE=80,
-  MAX_BASE_WORD_MS=300`) assumed per-syllable cost dominates a word's duration;
-  real fits showed the opposite (large fixed per-word cost, ~0 per-syllable cost)
-  and got inverted by the clamp into an audibly-fast TTS rate (raw fit gave
-  rate≈0.93, clamped gave 1.272). Bounds widened to `MIN_MS_PER_SYLLABLE=0,
-  MAX_BASE_WORD_MS=800`; confirmed fixed via a clean recalibration
-  (`final rate=1.024`). Multiplies with the Phase 8a tone-toggle rate when tone is
-  on. **Closed, no open flags.**
-  **Phase 12a (numbers/accents in syllable estimation) — shipped, Entry 31.
-  Closed, no open flags.** Digit runs now expand to standard cardinal English
-  words (e.g. "1999" → "one thousand nine hundred ninety-nine") with each
-  word's syllable count looked up directly, rather than vowel-counting
-  digits. Accented characters fold to their base letter (é→e, ñ→n) instead
-  of being deleted, since deletion could merge two vowels that should stay
-  separate ("jalapeño" → "jalapeo"); a diaeresis (naïve, Zoë) gets special
-  handling since it marks a vowel as deliberately not merged with its
-  neighbor. Tested clean: all prior silent-e regression cases still pass, no
-  crashes on edge cases (empty strings, 19-digit numbers), 20k-call perf
-  negligible (130ms). One accepted minor gap: a bare `"-7"` doesn't read as
-  "negative seven" — the leading `-` is ambiguous with phone-number dashes
-  and ranges ("5-10"), so it's left as a positive number rather than risking
-  misfires on the more common cases. Low priority.
-- **Movement-range smoothing (Phase 6a):** `WINDOW_MS=300`. Confirmed still working
-  correctly on mobile (Entry 23 diagnostics) — not implicated in the overshoot bug.
-- **Calibration mode (Phase 7b):** 4-step wizard (neutral → mutter → facing →
-  turned away) + Phase 11's 5th step (speed), saved to `localStorage`
-  (`readingAppCalibration`) — **per-device/per-browser, does not sync** between
-  e.g. desktop Chrome and mobile Chrome. Falls back to `DEFAULT_*` if nothing saved.
-- **Emotional tone toggle (Phase 8a):** punctuation-based heuristic only
-  (`!`/`?`/default), off by default. Tone decided once per resume, not
-  per-sentence — per-sentence chaining was tried twice and explicitly rejected
-  (wedged Chrome's speech engine both times, same bug *class* as the Edge freeze,
-  and the same bug class Phase 9a hit a third time via a disguised chain — Entry
-  24).
-  **Robotic-voice problem surfaced Entry 26, scoped as Phase 12b (not yet
-  started):** the tone toggle exists but wasn't enough to fix perceived voice
-  quality — with real (non-test-paragraph) text now loading via Phase 10a, the
-  default Web Speech browser voice reads as noticeably flat/robotic. Root cause is
-  the browser's default voice's prosody itself, not something Phase 8a's
-  punctuation heuristic was ever going to solve on its own. **Deliberately NOT
-  bundled with Phase 12a (duration estimation)** even though both surfaced in the
-  same session — 12a is a pure, deterministic string-logic fix; this one requires
-  listening/tuning against the live `speechSynthesis` engine, the same subsystem
-  that has already caused two confirmed freezes (Entry 16, Entry 24). Gets the
-  same caution and its own dedicated session as 9a, not folded into a "fix voice
-  stuff" grab-bag. Candidate directions to evaluate when this phase starts (not
-  decided yet): trying alternate installed voices via `speechSynthesis.getVoices()`
-  (quality varies a lot browser/OS-to-browser/OS, still $0), revisiting whether a
-  non-chaining variant of per-sentence tone application is possible now that Phase
-  9a's root cause (call-frequency ceiling, not chaining specifically) is better
-  understood, or accepting current voice quality as a platform limitation the same
-  way 9a's ceiling was accepted.
-- **Explicitly rejected, not deferred:** mic-based audible-speech safeguard (dead
-  weight for the ALS/paralysis audience, new permission prompt); ROI cropping
-  (recalibration risk not worth the battery gain vs. dynamic frame rate); per-
-  sentence tone chaining (see above); **sentence-chunked TTS utterances (Phase 9a,
-  Entry 24 — not rejected by design choice, but by a confirmed platform ceiling;
-  see above, may be revisited with a different mechanism)**.
+  speed-calibration wizard step. Dynamically scales the mouth-close-detection
+  threshold — see Fix 3c/3c-2 above for the current (resolved) version of this.
+  Digit/accent handling in `estimateSyllables()` shipped and closed (Phase 12a).
+- **Movement-range smoothing:** `WINDOW_MS=300`. Working correctly, not
+  implicated in any open bug.
+- **Calibration mode:** 4-step wizard (neutral → mutter → facing → turned away)
+  + speed step, saved to `localStorage` (`readingAppCalibration`), per-device/
+  per-browser. **Pending update once head-pose removal is built** — the
+  facing/turned-away steps will be dropped (see above).
+- **Emotional tone toggle (Phase 8a):** punctuation-based heuristic (`!`/`?`/
+  default), off by default, decided once per resume (per-sentence chaining
+  tried twice, rejected — same freeze-class bug as the old 9a ceiling).
+  **Robotic-voice problem (Phase 12b, Entry 43 — now the top priority, see
+  Section 3d):** two-stage plan — Stage A: expose `speechSynthesis.getVoices()`
+  as a picker (free, zero architectural risk, do first). Stage B (if Stage A
+  isn't enough): commit to Phase 13.5 (local Kokoro TTS) — benchmarking is
+  already done (see below), just needs a second-device breakeven-pace check
+  and the pace-floor safeguard before committing.
+- **Explicitly rejected, not deferred:** mic-based audible-speech safeguard
+  (dead weight for the ALS/paralysis audience); ROI cropping; per-sentence tone
+  chaining; sentence-chunked TTS utterances (confirmed platform ceiling, not a
+  design choice).
 - **Phase 7c:** dynamic frame rate, `IDLE_FRAME_INTERVAL_MS=100`.
-- **Text input (Phase 10a) — shipped, deployed to Vercel, Entry 26.**
-  `READING_TEXT` (hardcoded const) replaced with `currentText` (mutable, starts
-  `null`). Textarea is the single source of truth for both manual typing/testing
-  and `.txt` uploads — a file's contents load into the box rather than bypassing
-  it, so one "Load Text" action handles both paths and the student can review/edit
-  an uploaded file before committing it. `hasLoadedText()` gates Start Reading
-  everywhere it's re-enabled (including all three calibration-flow exit points,
-  which previously unconditionally re-enabled it) via a shared
-  `updateStartButtonState()`. Loading new text hard-stops any in-progress session
-  first (`cancel()` + flag reset, same pattern already used elsewhere) before
-  rebuilding word spans, so `baseOffset`/`wordSpans` can never end up pointing at
-  stale text. Persisted to `localStorage` (`readingAppText`, same pattern as
-  `readingAppCalibration`) and auto-restored on load. Old fixed test paragraph
-  kept only as a textarea *prefill* (not baked into `currentText`), so one-click
-  quick testing still works without typing anything. Test pass against arbitrary
-  text (see cadence entry above) confirmed word-splitting itself is solid; the
-  numbers/accents gap that pass surfaced became Phase 12a.
-- **Webcam/mesh visibility during reading (Entry 27, decided as part of scoping
-  10c, not yet built):** the live webcam feed + mesh overlay will be hidden by
-  default while actually reading — visible only during the calibration wizard,
-  where the student needs to see themselves to position correctly. Rationale:
-  Mumblew's actual audience (reading in bed/dark, low-focus readers, ALS/paralysis
-  users) has no reason to want to watch their own face on a green mesh while
-  trying to read or fall asleep; it belongs to the "test harness" phase of the
-  project, not the product. Tracking/MediaPipe processing keeps running underneath
-  regardless (the mouth/pose signal still needs it) — this is a *rendering* choice
-  only, not a functional one. Folded into Phase 10c rather than treated as a
-  separate mobile-layout fix (see Phase 10 entry below for why 10b was dropped as
-  a standalone phase).
+- **Text input / UI redesign / PDF upload (Phases 10a/10c/10d) — all shipped,
+  closed, no open flags.** `currentText` (mutable) replaced the old hardcoded
+  test paragraph; paste/type + `.txt`/`.pdf` upload (via lazy-loaded
+  `pdfjs-dist`) share one "Load Text" action; saved text persists via
+  IndexedDB (`mumblewDB`/`savedText`; migrated from localStorage at the PDF-
+  upload point since extracted text can be large); calibration data stays on
+  localStorage. Full dark-themed redesign shipped (logo `mumblew_logo.png`,
+  webcam/mesh hidden during actual reading — `.video-hidden` class, tracking
+  keeps running underneath — shown only during calibration; collapsible debug
+  panel; light `prefers-reduced-motion`-aware animation). Surfaced Phase 12a
+  (numbers/accents in duration estimation, since shipped) and 12b (voice
+  quality, see above) as follow-on work.
 
 ### 3b. Scope decisions
 
 - Platform: Web app, Chrome-first. Cross-browser support not a priority pre-demo.
 - Security: `textContent` never `innerHTML` (XSS guard), pinned CDN versions, CSP
-  header, camera-privacy disclosure, HTTPS via Vercel. Full review deferred to
-  Phase 14 (after file upload in Phase 10 actually expands the attack surface).
+  header, camera-privacy disclosure, HTTPS via Vercel. Full review at Phase 14.
 
-### 3c. Phases 9-15 (scoped Entry 14/15, revised Entry 22-27)
+### 3c. Phase 13.5 — Local on-device TTS engine (proposed, now likely — Entry 43)
 
-- **Phase 9 — Mobile bug fixes**, split as issues were found live-testing (Entry
-  22-23):
-  - **9a — Mobile speech-engine event unreliability. Attempted and reverted, Entry
-    24 — shelved as unsolved, not just "not yet built."** Root cause of the
-    original mobile symptoms still confirmed (see Section 3), but the chunking fix
-    hit a real Web Speech API ceiling (repeated `speak()` calls per session, not
-    just chained ones, wedge Chromium) — reproduced on desktop too. Needs a
-    different approach and a dedicated session, not a quick follow-up.
-  - **9b — No-face-detected safety gap. Fixed, tested, closed — Entry 24.** Not
-    mobile-exclusive; benefits both platforms. See Section 3.
-  - **9c — Off-axis/lying-down pose calibration.** Not yet root-caused. Set aside
-    for now alongside 9a/mobile-specific work (Entry 24 decision).
-- **Phase 10 — UI redesign + text input.** Now three sub-phases (revised Entry
-  27 — was four; 10b dropped, see below). Self-contained — doesn't touch the
-  fragile speech or pose subsystems at all. **Build order: 10a → 10c → 10d.**
-  - **10a — Text input. Shipped, deployed to Vercel — Entry 26.** Paste/type +
-    `.txt` upload, wired to replace the hardcoded `READING_TEXT`. Test pass done
-    (see Section 3). Surfaced two follow-on issues, deliberately spun out rather
-    than fixed inline: duration-estimation gaps on numbers/foreign words (→ Phase
-    12a) and a robotic-voice-quality concern (→ Phase 12b, unrelated root cause,
-    kept separate).
-  - ~~**10b — Portrait/vertical mobile layout fix.**~~ **Dropped as a standalone
-    phase (Entry 27).** Originally scoped to fix the hardcoded 640×480
-    `#container`/`#webcam`/`#overlay` stretching a portrait phone camera stream.
-    Reconsidered once the student pointed out (1) mobile-specific work is
-    already paused (9a/9c) and (2) more fundamentally, 10c is going to hide the
-    webcam/mesh view during actual reading anyway (see Section 3) — so a
-    general-purpose portrait fix for a view most readers won't be looking at
-    during reading was solving the wrong scope. What actually still needs
-    portrait handling is much narrower: just the **calibration view**, where the
-    video is genuinely shown. That's a small piece of layout work, folded into
-    10c and designed once alongside the webcam-visibility decision, rather than
-    patched separately beforehand and possibly thrown away once 10c changes when
-    the video is even shown.
-  - **10c — Full visual redesign. Shipped, Entry 28. No open flags.** Logo
-    integrated (`mumblew_logo.png` — background removed from student's source
-    file, cropped clear of corner decoration). Dark palette (teal/blue/gold/
-    coral/pink accents on a near-black teal-tinted bg) themed site-wide via CSS
-    vars. Webcam/mesh hidden by default (`.video-hidden` class: opacity+1px
-    box, not `display:none`, so MediaPipe keeps reading frames underneath —
-    resolves Entry 27's open question), shown only during calibration
-    (`setCalibrationVideoVisible()`, toggled at calibration start/cancel/
-    finish, but *not* on failure so the retry view stays visible). Former 10b's
-    portrait fix folded in as `updateVideoBoxSize()` — sizes the calibration
-    video box to the real stream's aspect ratio instead of a hardcoded 640x480.
-    Debug panel converted to a native `<details>`, closed by default, no JS
-    needed. Light CSS-only animation last (entrance fades, button hover,
-    Start-Reading ready-glow, border shimmer) — all teal/neutral, never red,
-    never touches `.word.active`, wrapped in `prefers-reduced-motion`.
-  - **10d — `.pdf` upload:** full PDF text-extraction support, split out as
-    its own sub-phase rather than deferred/cut (Entry 25 correction — student
-    wants this feature, just isolated since it's the one piece with real
-    added complexity). Needs `pdf.js` as a new CDN dependency (same pattern as
-    MediaPipe — loaded from jsdelivr) plus a `vercel.json` CSP update
-    (`script-src`/`connect-src`) to allow it. Comes after 10a/10c so the
-    simpler text-input paths (paste/`.txt`) and the redesigned UI they live in
-    are solid first; the PDF upload control's placement/styling in 10c should
-    still leave room for it to slot in without another layout pass. Once 10d
-    ships, revisit whether `localStorage` is still the right persistence layer
-    for Phase 10a's saved text — PDF-extracted text can get much larger than
-    typed/pasted text, and IndexedDB (considered and deliberately deferred at
-    10a, Entry 26) may be worth it then, not before.
-  - **Shipped, Entry 29. Closed, no open flags.** `.pdf` upload via
-    lazy-loaded `pdfjs-dist@5.6.205` (jsdelivr, same pinned-CDN pattern as
-    MediaPipe) — text-layer extraction only, no rendering/scripting engine
-    touched. Scanned/image-only PDFs correctly report no extractable text
-    (confirmed live). 20MB upload-size guard added (`.txt` + `.pdf`) —
-    UX/DoS-on-self safeguard, not a security boundary; uploaded content was
-    already safe from injection via the existing `textContent`-only render
-    path. `vercel.json` `worker-src` extended to allow pdf.js's worker file.
-    **Saved-text persistence also migrated `localStorage` → IndexedDB**
-    (`mumblewDB`/`savedText`, single-record store) in the same session, per
-    the note above — one-time silent migration of any pre-existing
-    localStorage session on first load. Calibration data (Phase 7b/11)
-    stays on localStorage, unaffected. Confirmed live: 8MiB PDF extracted
-    correctly, reload persistence via IndexedDB confirmed working.
-- **Phase 11 — Personalized speed calibration.** Shipped Entry 18, clamp bug fixed
-  Entry 23. Closed, no open flags.
-- **Phase 11b — Ambient trouble-shading.** Shipped Entry 19-21. Mobile
-  blinking symptom traced to the same root cause as 9a — still open on mobile
-  since 9a is shelved, not separate work.
-- **Phase 12a — Duration estimation accuracy. Shipped, Entry 31. Closed, no
-  open flags.** See Section 3 for full detail.
-- **Phase 12b — Voice quality / robotic tone (new, Entry 26). Not started.**
-  Address the flat/robotic default Web Speech voice, surfaced once real text
-  (rather than the old test paragraph) started going through the app. Touches the
-  live `speechSynthesis` engine — same caution and dedicated-session treatment as
-  9a, deliberately not bundled with 12a. Candidate directions listed in Section 3,
-  none decided yet.
-- **Phase 12c — Auto-scroll to active word (new, Entry 30).** Not started. Low
-  risk — pure DOM/rendering, no `speechSynthesis`/MediaPipe involvement. Follows
-  `.word.active` (likely via `scrollIntoView`) as reading progresses; must pause
-  on manual user scroll so it doesn't fight a reader who scrolls back up. Confirm
-  no regression on laptop first; mobile smoothness is a "check it's not broken"
-  pass only, not new mobile-tuning work (mobile stays paused per Entry 24).
-- **Phase 12d — Sticky-word bug (new, Entry 30 — but a long-observed issue, not
-  newly discovered).** Some words (e.g. "movement") occasionally stall for a
-  short duration, needing a repeat/next-word mouth action to release. Minor but
-  makes reading feel forceful on certain words. Root cause not yet
-  investigated — diagnose before fixing; may connect to cadence/detection-
-  threshold behavior, not yet confirmed.
-- **Phase 13.5 — Local on-device TTS engine (new, Entry 30). Proposed, not
-  started — deliberately standalone and revertible, placed before Phase 14 for
-  that reason (a clean rollback point if it doesn't pan out).** Replaces
-  `speechSynthesis` playback with a locally-cached WASM TTS model played via
-  `<audio>`/Web Audio, giving continuous `playbackRate` control with zero
-  re-synthesis calls — sidesteps the `speechSynthesis` call-frequency ceiling
-  (Entry 24) entirely rather than working around it. Would resolve Phase 12b
-  (robotic voice) and enable a continuous manual speed control (not separately
-  numbered — only exists if this phase ships). Also subsumes Phase 8b (voice
-  cloning) and 8c (offline mode) if shipped.
-  Engine: leaning Kokoro (Apache 2.0) over Piper — Piper's original MIT repo
-  was archived Oct 2025, active development is now GPL-3.0, a real constraint
-  given Phase 15's eventual paywall question.
-  Storage: OPFS/IndexedDB (sandboxed to the app's origin), not a visible
-  folder — no extra permission dialog beyond existing storage-quota prompts.
-  Security: requires SRI-pinned model+engine files (integrity-checked on
-  cache load too, not just first download) and scoped CSP additions — reviewed
-  alongside, not instead of, Phase 14.
-  **Gated on a real concurrent-load benchmark** (MediaPipe + local TTS
-  inference running together, measuring frame-rate stability, on actual
-  low-end hardware) — not yet run. Web Speech stays as a permanent fallback,
-  never a required gate, regardless of benchmark result.
-  **Not committed — flagged for scoping once benchmarked.**
-- **Phase 13 — Distance/recalibration robustness** (renumbered from 12, Entry 26).
-  Not started. May turn out related to Phase 9c.
-- **Phase 14 — Full security review** (renumbered from 13, Entry 26; after Phase
-  10).
-- **Phase 15 — Shipping prep + paywall** (renumbered from 14, Entry 26). Ethical
-  flag to revisit then: target audience includes ALS/paralysis users — a paywall
-  by default deserves a deliberate decision, not a default.
+Replaces `speechSynthesis` playback with a locally-cached WASM TTS model
+(Kokoro, Apache 2.0 — Piper ruled out, license moved MIT→GPL-3.0 Oct 2025)
+played via `<audio>`/Web Audio, giving continuous `playbackRate` control with
+zero re-synthesis calls. Would resolve Phase 12b (voice quality) and enable
+Phase 13.6 (continuous speed control) in one build. Web Speech stays as a
+permanent fallback regardless of outcome.
+
+**Settled findings (Entries 35-38, full narrative in harnesses `/benchmark`,
+`/benchmark-round2`, `/benchmark-round3` if ever needed again):**
+- No free word/phoneme timestamps from Kokoro in-browser — resolved by
+  distributing each chunk's measured audio duration across its words via the
+  existing syllable/cadence weighting.
+- Concurrent MediaPipe+Kokoro frame-rate impact is moderate (WASM ~40%,
+  WebGPU ~48% degradation on the dev laptop, an i7-8650U). WebGPU roughly
+  halves synth time vs. WASM. fp32 is the only usable WebGPU dtype (fp16
+  glitchy, q4 slower and degraded on this GPU backend).
+- Deeper pre-buffering doesn't help (single-Kokoro-instance throughput
+  ceiling). Dual-worker parallelism ruled out (Entry 38, see Section 3).
+- **Core finding:** synth runs ~5.6-5.7s/sentence (WebGPU/fp32) regardless of
+  buffering/parallelism. Wait converges to ~0ms only if the reader's
+  calibrated pace clears a **~555ms/word breakeven — measured on one laptop
+  only.** The dev's real calibration (650ms/word) clears it; uncalibrated
+  defaults (426ms/word) don't.
+- **Not committed. One direction open:** a pace floor/clamp on top of speed
+  calibration — readers faster than breakeven get effective TTS pace clamped;
+  slower readers keep true pace. **Needs a second, weaker-device benchmark
+  before locking in a floor value** — the one number above is single-laptop
+  only. This is the concrete next step if Stage A (voice picker) doesn't
+  resolve Phase 12b on its own (see Section 3).
+
+## 3d. Priority order for remaining work (reset Entry 43 — 9a's resolution
+frees this up substantially; head-pose removal reprioritized in)
+
+1. **Deploy current build** (speaking-poll fix, Fix 3c/3c-2, tab-visibility
+   fix) — ready now, pending student action.
+2. **Voice quality Stage A** — `getVoices()` picker. Cheap, do first, no
+   architectural risk.
+3. **Head-pose gating removal** — decided (Entry 43), not yet built. Drops the
+   facing/turned-away calibration steps, resolves 9c by making it moot.
+4. **Voice quality Stage B** — commit to Phase 13.5 (local TTS) if Stage A
+   isn't enough. Needs a second-device benchmark first. Also unlocks Phase
+   13.6 (continuous speed control) as a side effect.
+5. **Phase 13** (distance/recalibration robustness) — easier to isolate once
+   #3 removes the pose-gating confound.
+6. **PWA packaging** (Entry 43) — manifest + service worker + icons, mostly
+   free. iOS Safari camera-in-installed-PWA access is historically unreliable
+   (permission not persisted in standalone mode, no native install-prompt API
+   on iOS) — plan to keep the camera-dependent reading flow tested and
+   working in regular Safari-tab mode as the iPad fallback, don't assume
+   installed-mode camera access "just works" there without real device
+   testing. Best slotted near Phase 15 once the core experience is settled.
+7. **Phase 14** (security review), **Phase 15** (shipping prep + paywall,
+   with the standing ethical note: ALS/paralysis audience means a default
+   paywall deserves a deliberate decision, not a default) — last, unchanged.
 
 ## 4. Roadmap
 
 - [x] **Phases 0-8a:** webcam/facemesh, MAR play/pause, word highlighting +
       head-pose gating, click-to-word resync, Vercel deploy, movement-range
-      smoothing, cadence-based pacing, head-pose calibration wizard, dynamic frame
-      rate, emotional tone toggle. All deployed. Full details in Section 3.
-- [ ] **Phase 8b:** Voice cloning — needs a scope conversation (budget/privacy
-      tension), not a build session.
-- [ ] **Phase 8c:** Offline mode — not started, feasible free.
-- [ ] **Phase 9a:** Mobile speech-engine event unreliability — attempted and
-      reverted (Entry 24), shelved as an unsolved platform ceiling. Revisit in a
-      dedicated session, different approach needed.
-- [x] **Phase 9b:** No-face-detected safety gap — fixed, tested, closed (Entry 24).
-      No open flags.
-- [ ] **Phase 9c:** Off-axis/lying-down pose calibration — not yet root-caused.
-      Set aside alongside 9a for now.
-- [ ] **Phase 10:** UI redesign + text input. Three sub-phases (revised Entry
-      27): 10a / 10c / 10d. Build order: 10a → 10c → 10d.
-  - [x] **10a:** Text input (paste + `.txt`) — shipped, deployed to Vercel
-        (Entry 26). Surfaced Phase 12a/12b as follow-on work.
-  - ~~**10b:** Portrait/vertical mobile layout fix~~ — dropped as a standalone
-        phase (Entry 27); the narrow piece still needed (calibration-view
-        portrait handling) folded into 10c.
-  - [x] **10c:** Full visual redesign — shipped, Entry 28. No open flags.
-  - [x] **10d:** `.pdf` upload — shipped, Entry 29. No open flags. Also the
-        trigger point for the localStorage → IndexedDB migration (Entry 29).
-        **Phase 10 (10a/10c/10d) now fully complete; 10b dropped (Entry 27).**
-- [x] **Phase 11:** Personalized speed calibration — shipped, clamp bug fixed
-      Entry 23. No open flags.
-- [x] **Phase 11b:** Ambient trouble-shading — shipped; mobile blinking is a 9a
-      symptom, still open since 9a is shelved.
-- [x] **Phase 12a:** Duration estimation accuracy (numbers, foreign words) —
-      shipped, Entry 31. No open flags.
-- [ ] **Phase 12b:** Voice quality / robotic tone — new, Entry 26. Not started.
-      Touches live speech engine — needs its own dedicated session, like 9a.
-- [ ] **Phase 12c:** Auto-scroll to active word — new, Entry 30. Not started.
-      Low risk, self-contained.
-- [ ] **Phase 12d:** Sticky-word bug (e.g. "movement" stalling) — new to the log
-      (Entry 30) but long-observed. Not root-caused yet.
-- [ ] **Phase 13.5:** Local on-device TTS engine — new, Entry 30. Proposed, not
-      committed. Standalone/revertible, gated on a concurrent-load benchmark
-      not yet run. Would resolve 12b + enable continuous speed control; also
-      subsumes 8b/8c if shipped.
-- [ ] **Phase 13:** Distance / recalibration robustness (renumbered from 12).
-- [ ] **Phase 14:** Full security review pass (renumbered from 13; after Phase 10).
-- [ ] **Phase 15:** Shipping prep + paywall (renumbered from 14).
+      smoothing, cadence-based pacing, calibration wizard, dynamic frame rate,
+      emotional tone toggle. All deployed.
+- [ ] **Phase 8b:** Voice cloning — needs a scope conversation, not started.
+- [ ] **Phase 8c:** Offline mode — not started, feasible free; PWA work
+      (Entry 43) would give this a head start.
+- [x] **Phase 9a:** Mobile/session speech-engine reliability — **RESOLVED,
+      ready to deploy (Entry 40-42).** Real causes: `onend` broken after
+      `cancel()` (fixed via `speaking`-poll), cadence-gating flaw (fixed via
+      Fix 3c/3c-2, live-monitored not exhaustively proven), tab-backgrounding
+      safety gap (fixed via visibilitychange listener, Entry 42). See Section 3.
+- [x] **Phase 9b:** No-face-detected safety gap — fixed, tested, closed.
+- [x] **Phase 9c:** Off-axis/lying-down pose calibration — **superseded, moot
+      once head-pose gating removal (Entry 43) ships**; no longer being
+      root-caused as its own item.
+- [x] **Phase 10:** UI redesign + text input (10a/10c/10d) — fully shipped,
+      closed. See Section 3.
+- [x] **Phase 11 / 11b:** Speed calibration + ambient trouble-shading —
+      shipped, closed.
+- [ ] **Phase 12b:** Voice quality / robotic tone — **now top priority
+      (Entry 43).** Two-stage plan in Section 3/3c. Not started.
+- [x] **Phase 12a / 12c / 12d:** Duration estimation, auto-scroll, sticky-word
+      diagnosis — all shipped/closed. 12d's real clock bug fixed; remaining
+      stalls were the same root cause as 9a, resolved there.
+- [ ] **Phase 13.5:** Local on-device TTS — proposed, likely next after Stage
+      A. Findings settled, see Section 3c. Needs a second-device benchmark
+      before committing to a pace-floor value.
+- [ ] **Phase 13:** Distance/recalibration robustness — not started, clearer
+      to tackle once head-pose removal ships (Section 3d).
+- [ ] **Phase 13.6:** Continuous speed control — rides on Phase 13.5, no
+      independent path (browser hard limit: `speechSynthesis.rate` can't
+      change mid-utterance).
+- [ ] **Head-pose gating removal** (new, Entry 43) — decided, not yet built.
+      See Section 3.
+- [ ] **PWA packaging** (new, Entry 43) — decided as a direction, not yet
+      built. See Section 3d for the iOS caveat.
+- [ ] **Phase 14:** Full security review pass — after Phase 10 (done), not
+      yet started.
+- [ ] **Phase 15:** Shipping prep + paywall — last. Ethical flag stands: ALS/
+      paralysis audience means a default paywall needs a deliberate decision.
 
 ## 5. Current status
 
-Project folder `reading-app` (app name: **Mumblew**): `index.html` + `main.js`,
-deployed to Vercel. Phases 0-8a complete and deployed. Phase 11/11b shipped (11b
-has an open mobile symptom, tied to shelved 9a). Phase 10a shipped and deployed to
-Vercel (Entry 26) — student tested locally and confirmed live.
+Project folder `reading-app`: `index.html` + `main.js`, previously deployed to
+Vercel through Phase 10a. **Phases 0-8a, 9b, 10, 11/11b, 12a/12c/12d all
+shipped and deployed.**
 
-**Mobile-specific work remains paused (Entry 24).** 9b is fixed/closed. 9a was
-attempted, caused a worse regression than the bug it targeted, and was fully
-reverted — shelved as an unsolved platform ceiling. 9c (lying-down pose) remains
-unexplained. Not being chased right now.
+**Phase 9a is now resolved** (Entry 40-42): the `speaking`-poll fix, Fix
+3c/3c-2 gating, and the new tab-visibility fix are all live in the local
+`main.js`/`index.html` and tested clean, but **not yet deployed to Vercel** —
+that's the immediate next action, pending the student.
 
-**Phase 10c shipped (Entry 28)** — see Section 3 for full detail. `index.html`/
-`main.js` now include the dark theme, logo, webcam-hidden-by-default behavior,
-collapsible debug panel, and light animation, on top of Phase 10a's text input.
-Project now has a third asset: `mumblew_logo.png` (transparent, dark-mode ready)
-sits alongside `index.html`/`main.js`.
+**This session (Entry 41-43):**
+- Entry 41: isolated long-utterance test found no evidence for the suspected
+  premature-`finishReading()` blip theory; 15 live back-to-back test runs
+  found no sticky words with Fix 3c/3c-2. Decision: ship as-is, monitor via
+  the new diagnostic (debug panel + `[Fix 3c/3c-2 diag]` console log) rather
+  than continuing to chase either as a dedicated investigation.
+- Entry 42: found and fixed a real, previously-undiscovered bug — speech kept
+  playing after switching away from the browser tab entirely, because the
+  whole mouth/face detection loop depends on `requestAnimationFrame`, which
+  browsers suspend when backgrounded. Fixed via the Page Visibility API,
+  confirmed working live by the student.
+- Entry 43: major scoping discussion (no code) on five fronts — voice quality
+  (two-stage plan, Stage A next), continuous speed control (rides on 13.5),
+  head-pose gating (removal decided, not yet built), distance calibration
+  (separate from head-pose, easier once head-pose is gone), and PWA packaging
+  (feasible, iOS camera-in-PWA caveat flagged). See Section 3/3d for full
+  reasoning and the updated priority order.
 
-**Phase 10d shipped (Entry 29)** — `.pdf` upload (text-layer extraction via
-`pdf.js`) plus a localStorage→IndexedDB migration for saved text (see
-Section 3). **Phase 10 is now fully complete** (10a/10c/10d shipped, 10b
-dropped). No open flags on any of Phase 10.
-
-**Phase 12a shipped (Entry 31)** — see Section 3. **Phase 12b remains
-not-yet-started**, unaffected by 12a: robotic default-voice quality, touches
-live `speechSynthesis`, needs its own dedicated session like 9a.
-
-**Agreed build order (Entry 31): 12a → 12c → 12d → then benchmark/decide
-between 12b and 13.5.** 12a done. Next up: **12c (auto-scroll to active
-word)**.
-
-Temporary diagnostics still live in the debug panel from the Entry 22-23
-mobile-testing effort (boundary event counter, last-onboundary timer, speed-fit
-raw readout, sticky detection-gap and cancel-to-stop-gap readouts). Since 9a is
-shelved rather than closed, leave these in place — they're exactly what a future
-9a attempt will need again, and stripping them now just means rebuilding them
-later.
-
-Key technical values/constants are all in Section 3 — not duplicated here.
+Diagnostics still live in the debug panel (harmless, kept): boundary/
+duplicate-boundary/early-close/session-speak counters, iframe-recycle count,
+the new Fix-3c/3c-2 risky-window row. Key technical values/constants are all
+in Section 3 — not duplicated here.
 
 ## 6. Log of sessions
 
-- **Entries 1-14 (Jul 6-11):** Built and deployed Phases 0-7 (webcam/facemesh, MAR
-  play/pause, word highlighting + head-pose gating, click-to-word resync, Vercel
-  deploy, movement-range smoothing, cadence-based pacing, head-pose calibration
-  wizard, dynamic frame rate). Fixed the Edge `speechSynthesis` freeze bug. Scoped
-  Phases 9-14. Full decisions in Section 3.
-- **Entries 15-21 (Jul 11-19):** Built Phase 8a (tone toggle; per-sentence
-  chaining tried and rejected twice). Built Phase 11 (speed calibration wizard —
-  peak-trough detection, two-pass sampling, stall/outlier handling; flagged a
-  clamp-bounds issue, resolved Entry 23). Built and shipped Phase 11b (ambient
-  trouble-shading; fixed a cadence-clock bug; live-validated on Vercel). Full
-  decisions in Section 3.
-- **Entry 22 (Jul 19):** Chose Phase 9 (mobile bug fix) over Phase 12 as next
-  action — regression on working functionality, small/isolated, working theory
-  already narrowed.
-- **Entry 23 (Jul 22):** Mobile testing session. Added temporary diagnostics
-  (boundary counter, onboundary timer, sticky detection/cancel-stop gap
-  readouts). Confirmed root cause of the click-to-word "sticky" bug: `onboundary`
-  never fires on mobile Chrome at all. Found and fixed the Phase 11 speed
-  clamp-bounds bug using real calibration console data — confirmed via clean
-  recalibration. Found and fixed head-pose hand-tremor oversensitivity via EMA
-  smoothing. Diagnosed the mouth-close word-overshoot bug down to `cancel()` not
-  reliably triggering `onend` on mobile — same root cause also explains the
-  still-blinking Phase 11b trouble border. Ruled out cadence gating and movement-
-  range smoothing as causes via live on-device measurement. Found (code
-  inspection) a no-face-detected safety gap — not mobile-exclusive. Found (live
-  testing) that pose calibration doesn't hold well while lying down — not yet
-  root-caused. Split remaining mobile work into Phase 9a/9b/9c. Added a standing
-  cross-device regression-check principle to Section 2. Trimmed this file
-  substantially per student's request to control file size.
-- **Entry 24 (Jul 24):** Built Phase 9a — bounded TTS utterances to one sentence
-  instead of all remaining text. Found and fixed a real bug in the first version
-  (resume point would re-speak a sentence's last word). First version also
-  auto-continued into the next sentence from `onend`, disguised through
-  `onMouthOpen()`'s gating — this reproduced Entry 16's freeze; removed it. A
-  second, worse freeze still surfaced on **laptop** mid-sentence, unrecoverable
-  for the rest of the session — traced to sentence-chunking simply raising
-  `speak()`-call frequency past Chromium's tolerance in general, not just chained
-  calls specifically — a real platform ceiling, not an implementation bug. Fully
-  reverted `main.js` to pre-9a. Built and fully tested Phase 9b (no-face-detected
-  safety gap) — six-case extreme test pass, all passed; closed, no open flags.
-  Decided to stop pursuing mobile-specific work (9a, 9c) for now; Phase 10 next.
-- **Entry 25 (Jul 24):** Scoping discussion only, no code changed. Broke Phase
-  10 into 10a (text input: paste/`.txt`) / 10b (portrait/mobile layout fix) /
-  10c (full visual redesign — student clarified this is a deliberate shift
-  from "test harness" toward a real product for the app's actual audience,
-  not just cosmetic cleanup) / 10d (`.pdf` upload via `pdf.js` + CSP update —
-  student corrected an earlier plan to stub/defer this: it's not cut, just
-  isolated as its own sub-phase since it's the one piece with real added
-  complexity). Build order confirmed: 10a → 10b → 10c → 10d. Decided the
-  debug panel gets made collapsible/toggleable, hidden by default, in 10c
-  rather than removed — its diagnostics still need to stay reachable for a
-  future 9a attempt. Next session starts 10a.
-- **Entry 26 (Jul 24):** Built and shipped Phase 10a. Replaced hardcoded
-  `READING_TEXT` with mutable `currentText`; added paste/type textarea +
-  `.txt` upload sharing one "Load Text" action; gated Start Reading behind
-  `hasLoadedText()` everywhere it's re-enabled (including all three
-  calibration-flow exit points); new text hard-stops any active session
-  before rebuilding word spans; persisted to `localStorage`
-  (`readingAppText`, same pattern as calibration) with auto-restore on load;
-  old test paragraph kept only as a textarea prefill. Chose `localStorage`
-  over IndexedDB for now (typed/pasted/`.txt` text is small; revisit once
-  10d's PDF text can get large). Ran a scripted test pass against arbitrary
-  text (whitespace, curly quotes, em-dashes, hyphenation, ALL CAPS, a
-  20k-word stress test, full silent-e regression check) — word-splitting
-  held up cleanly; surfaced a real gap in `estimateSyllables()` on numbers
-  and accented/foreign words, invisible under the old fixed test paragraph.
-  Student tested locally and deployed to Vercel; confirmed live. Student
-  then flagged the default Web Speech voice sounds noticeably more robotic
-  on real text than it did on the old test paragraph. Discussed and split
-  the two newly-surfaced issues into separate phases rather than one bundled
-  fix: **Phase 12a** (duration estimation on numbers/foreign words —
-  deterministic, low-risk) and **Phase 12b** (voice quality/robotic tone —
-  touches the live `speechSynthesis` engine, gets 9a-style dedicated-session
-  caution, candidate directions listed but nothing decided). Inserted both
-  before the old Phase 12, renumbering it and everything after
-  (12→13 distance/recalibration, 13→14 security, 14→15 shipping/paywall).
-  Phase 10's own build order (10a→10b→10c→10d) unaffected. Next up: 10b.
-- **Entry 27 (Jul 24):** Scoping discussion only, no code changed. Student
-  questioned whether standalone Phase 10b still made sense, given mobile
-  work is paused and — more importantly — 10c will hide the webcam/mesh view
-  during actual reading, making a general portrait layout fix for that view
-  largely moot. Agreed: dropped 10b as a standalone phase; folded its one
-  still-relevant piece (portrait handling for the calibration view, where
-  video is genuinely shown) into 10c. Clarified and expanded 10c's scope in
-  detail: branding foundation first (app name **Mumblew** confirmed, student
-  has a logo already), then theme applied site-wide, then the
-  webcam/mesh-hidden-during-reading change (with calibration-view portrait
-  handling folded in here), then the existing collapsible-debug-panel plan,
-  then light/restrained animation last — kept deliberately light so it
-  doesn't compete with existing functional motion (trouble-border,
-  word-highlight) or add load on top of the live MediaPipe loop. Flagged one
-  open question for when 10c starts: whether the hidden webcam view should
-  be removed from the DOM or just visually hidden while tracking continues
-  underneath (assumption: the latter, not yet confirmed). Renamed project
-  header/title in this file to Mumblew. Next up: Phase 10c.
-- **Entry 28 (Jul 24):** Built and shipped Phase 10c (all 5 steps — see
-  Section 3). Logo processed from student's source image (bg removed,
-  cropped clear of corner decoration) into `mumblew_logo.png`. No open
-  flags. Next up: Phase 10d.
-- **Entry 29 (Jul 25):** Built and shipped Phase 10d (`.pdf` upload) and,
-  same session, migrated saved-text persistence from localStorage to
-  IndexedDB (see Section 3 for both). Confirmed live by student: 8MiB PDF
-  extracted correctly, scanned/image PDF correctly errors as no-text-found,
-  reload persistence via IndexedDB confirmed working. **Phase 10 fully
-  complete.** No open flags. Next phase not yet chosen.
-- **Entry 30 (Jul 25):** Scoping discussion only, no code changed. Added
-  Phase 12c (auto-scroll to active word) and 12d (long-observed sticky-word
-  stall bug). Discussed a continuous manual speed control at length — rejected
-  wheel-driven `cancel()`/`speak()` and sentence-boundary-triggered updates,
-  both re-hitting 9a's `speechSynthesis` call-frequency ceiling; led to a
-  bigger idea — replacing `speechSynthesis` with a locally-cached WASM TTS
-  model played via `<audio>`/Web Audio for real continuous `playbackRate`
-  control with zero re-synthesis calls. Scoped security (SRI pinning, CSP,
-  OPFS/IndexedDB storage instead of a visible folder), verified voice-model
-  licensing (Kokoro/Apache-2.0 favored over Piper, whose license moved
-  MIT→GPL-3.0 in Oct 2025), and flagged it needs a real concurrent MediaPipe+TTS
-  benchmark on real hardware before commitment — not run yet. Logged as
-  **Phase 13.5**, placed before Phase 14 deliberately (standalone/revertible).
-  Explicitly not committed or started. See Section 3c for full detail.
-- **Entry 31 (Jul 25):** Agreed build order for the Phase 12 group: 12a → 12c
-  → 12d → benchmark/decide 12b vs 13.5. Built and shipped Phase 12a (digit
-  and accent handling in `estimateSyllables()`) — tested clean, no
-  regressions. Closed, no open flags. Next up: 12c.
+- **Entries 1-14 (Jul 6-11):** Built and deployed Phases 0-7. Fixed the Edge
+  `speechSynthesis` freeze bug. Scoped Phases 9-14.
+- **Entries 15-21 (Jul 11-19):** Built Phase 8a (tone toggle). Built and
+  shipped Phase 11 (speed calibration) and 11b (ambient trouble-shading).
+- **Entries 22-24 (Jul 19-24):** Mobile testing session — diagnosed and split
+  Phase 9 into 9a/9b/9c. Fixed Phase 9b (no-face safety gap) and a Phase 11
+  clamp-bounds bug. Attempted and reverted Phase 9a's first fix (sentence
+  chunking) after it caused a worse laptop freeze — confirmed a real Web
+  Speech API ceiling, not an implementation bug. Mobile-specific work (9a,
+  9c) paused after this.
+- **Entries 25-29 (Jul 24-25):** Scoped and shipped Phase 10 (10a text input,
+  10c visual redesign — Mumblew name/logo, 10d PDF upload + IndexedDB
+  migration). 10b dropped as a standalone phase, folded into 10c.
+- **Entries 30-34 (Jul 25-26):** Scoped Phase 12c/12d and Phase 13.5 (local
+  TTS) in depth — architecture, security, licensing, build-order decisions.
+  Shipped 12a (duration estimation) and 12c (auto-scroll).
+- **Entries 35-38 (Jul 26-28):** Phase 13.5 benchmark arc — timing-data
+  feasibility, WASM/WebGPU tradeoffs, pre-buffering, dual-worker parallelism
+  (ruled out). Diagnosed 12d (one real clock bug fixed; remaining stalls
+  folded into 9a as the same root cause).
+- **Entry 39 (Jul 28):** Revived Phase 9a via an iframe-recycle candidate fix
+  (synthetic freeze-reproduction failed across 4 attempts; tested live
+  instead — 20 sessions, no freeze). A new laptop overshoot regression
+  surfaced during that testing, investigated in Entry 40.
+- **Entry 40 (Jul 29):** Root-caused Entry 39's regression: ruled out the
+  iframe swap (reproduced on a non-iframe deploy), found the real causes —
+  `onend` broken after `cancel()` (fixed via `speaking`-poll) and a
+  cadence-gating design flaw (fixed via Fix 3c/3c-2). A new suspected
+  premature-`finishReading()` bug surfaced during this testing, queued for
+  isolated testing next session.
+- **Entry 41 (Jul 29):** Built an isolated long-utterance test harness for
+  the premature-`finishReading()` theory. Two harness bugs found and fixed
+  along the way (a cancel-before-speak nudge that wedged the engine; a
+  25s timeout too short for natural long-text speech rate) before getting a
+  trustworthy result: 3/3 clean completed trials, 0 spurious blips. Decided
+  to stop chasing this theory. Added a Fix-3c/3c-2 tuning diagnostic
+  (in/out of risky window, ms delta) to `main.js`/`index.html`, no behavior
+  change; 15 live back-to-back test runs of a previously-sticky paragraph
+  came back clean. Discussed deploy readiness — recommended shipping given
+  both remaining concerns are now rare/unreproduced, not systematic.
+- **Entry 42 (Jul 29):** Investigated and fixed a new bug reported by the
+  student: speech kept playing after switching to a different application
+  entirely, mouth closed, camera not covered. Root cause: `predictLoop()`
+  (and therefore every mouth/face safety check) depends on
+  `requestAnimationFrame`, which is suspended when the tab/window is
+  backgrounded; `speechSynthesis` has no such throttling. Fixed via a
+  `document.visibilitychange` listener that stops speech and clears state
+  independent of `predictLoop`, without auto-resuming on return. Confirmed
+  working live by the student.
+- **Entry 43 (Jul 29):** Scoping discussion only, no code changed. Student
+  raised five forward-looking questions. Agreed direction on all five: (1)
+  voice quality — two-stage plan, cheap `getVoices()` picker first, Phase
+  13.5 (local TTS) as the fallback; (2) continuous speed control rides on
+  Phase 13.5, no independent path; (3) head-pose gating — **removal decided**
+  (yaw/pitch can't distinguish "looking away" from "lying down," a core use
+  case, and the student's own broader experience is that it's oversensitive
+  generally; mouth-close already provides a buttonless pause, so no manual
+  toggle needed as a replacement); (4) distance calibration (Phase 13) is a
+  separate concern from head-pose, but removing head-pose gating removes a
+  diagnostic confound and makes Phase 13 easier to isolate later; (5) PWA
+  packaging is feasible and mostly free, with a flagged iOS Safari caveat
+  (camera access inside an installed/standalone PWA has a rocky history —
+  plan to keep the camera flow tested in regular Safari-tab mode on iPad as
+  a fallback). Updated priority order in Section 3d. This file trimmed
+  substantially in the same session — Phase 9a's full investigation
+  narrative (Entries 22-24, 33, 39, 40) and old shipped-phase detail
+  (10a/10c/10d, 11/11b, 12a/12c/12d) collapsed to settled conclusions now
+  that 9a is resolved and those phases are long-closed.

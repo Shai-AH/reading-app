@@ -179,8 +179,10 @@ let PERSONALIZED_RATE = DEFAULT_PERSONALIZED_RATE;
 const CADENCE_UNDER_FACTOR = 0.6; // stricter: threshold * 0.6
 const CADENCE_OVER_FACTOR = 1.5;  // looser: threshold * 1.5
 
-let mouthOpenStartTime = 0;    // performance.now() when the current open phase began
-let currentWordExpectedMs = 0; // estimated duration for the word active when mouth opened
+// Phase 12d fix: mouthOpenStartTime/currentWordExpectedMs (a clock that
+// only reset on closed->open transitions) used to live here and drove the
+// stop-detection threshold below. Removed — see the fix note in
+// updateMouthState. One clock now, not two.
 // Mobile testing session (diagnostic): precise, non-eyeballed measurement of
 // the gap between "MAR first dropped below CLOSE_THRESHOLD" and "isMouthStopped
 // actually went true". Resets whenever MAR pops back above CLOSE_THRESHOLD, so
@@ -395,15 +397,11 @@ const SAMPLE_WORDS = SAMPLE_SENTENCE.match(/\S+/g).map(text => ({
 // index in the tracker wraps via `% SAMPLE_WORDS.length` against this.
 const RATE_PASSES = 2;
 
-// Picks the word this cadence estimate should be based on: the currently
-// highlighted word if one is active, otherwise the word at the pending
-// resume offset (covers the moment right after Start Reading / a click,
-// before the first onboundary event has landed).
-function getWordForCadence() {
-  if (activeWordIndex !== -1) return wordSpans[activeWordIndex].span.textContent;
-  const idx = wordSpans.findIndex(w => (baseOffset + lastBoundaryOffset) >= w.start && (baseOffset + lastBoundaryOffset) < w.end);
-  return idx !== -1 ? wordSpans[idx].span.textContent : '';
-}
+// Phase 12d fix: getWordForCadence() (used only to prime the now-removed
+// mouthOpenStartTime/currentWordExpectedMs clock on a closed->open
+// transition) has been removed — the per-word clock below is always kept
+// current by highlightWordAt/speakFrom regardless of mouth state, so there's
+// nothing left to prime here.
 
 // --- Phase 8: emotional tone toggle ---
 // Off by default. When on, each resume looks ahead to the sentence its start
@@ -422,6 +420,148 @@ toneToggleEl.addEventListener('change', () => {
   toneEnabled = toneToggleEl.checked;
   toneValueEl.textContent = toneEnabled ? 'on, neutral' : 'off';
 });
+
+// --- Phase 12b Stage A: voice picker -----------------------------------
+// Cheap, zero-architectural-risk first pass at the "robotic voice" problem
+// (Entry 43): let the reader pick from whatever voices this browser/OS
+// already ships, rather than silently using the Web Speech default. If this
+// isn't enough on its own, Stage B (Phase 13.5, local Kokoro TTS) is the
+// planned fallback — see PROGRESS.md Section 3/3c.
+//
+// LOCAL VOICES ONLY (Entry 44). An isolated 22-voice diagnostic harness
+// (cancel-reliability / onboundary-accuracy / rate-honoring, see
+// harness/voice-diagnostic.html) found that Chrome's network/cloud voices
+// (Google's non-default voices) essentially never fire `onboundary` — 0/17
+// word events on 19 of 22 voices tested, with the 3 "passes" almost
+// certainly a network-timing fluke rather than a real guarantee, since
+// cloud-synthesis latency is non-deterministic run to run. That single gap
+// explained two live-app symptoms at once: word highlighting snapping back
+// to a stale position (lastBoundaryOffset never updates without
+// `onboundary`), and speech continuing past a mouth close (Fix 3c/3c-2's
+// gating logic resets its timing anchor on every `onboundary`; with none
+// firing, that anchor goes stale for the whole utterance). `cancel()`
+// itself tested 100% reliable across all 22 voices in isolation — it's the
+// app's own logic for deciding *when* to call it that broke down.
+// Excluding network voices is a categorical, architectural decision (not
+// "these specific ones failed today") — a mechanism that can silently pass
+// on a fast connection and fail on a slow one is not acceptable for a
+// safety-critical stop signal.
+//
+// Design notes (unchanged from initial Stage A build):
+// - We persist the voice's `voiceURI` (a stable identifier), not the
+//   SpeechSynthesisVoice object itself. Voice objects are re-fetched fresh
+//   at speak time (see resolveSelectedVoice() in speakFrom) rather than
+//   cached, because Phase 9a's TTS-iframe recycling (IFRAME_TTS_RECYCLE_ENABLED)
+//   periodically swaps ttsEngine.synth to a brand-new iframe's
+//   speechSynthesis instance — a voice object captured from the OLD
+//   instance is not guaranteed to be valid/assignable on the new one, even
+//   though voiceURI stays stable across them (same underlying platform
+//   voice list). Re-resolving by URI at call time sidesteps that entirely.
+// - getVoices() is notoriously async-on-first-load in Chrome (empty array
+//   until the 'voiceschanged' event fires) — we populate on both the
+//   initial call and every 'voiceschanged' firing, and re-apply the saved
+//   selection each time so a late-arriving voice list doesn't silently
+//   fall back to "Browser default" after the user already chose something.
+const VOICE_STORAGE_KEY = 'readingAppVoice';
+let selectedVoiceURI = ''; // '' = explicit "Browser default", no utterance.voice assignment
+const voiceSelectEl = document.getElementById('voiceSelect');
+const voiceValueEl = document.getElementById('voiceValue');
+
+// Single source of truth for "is this voice allowed" — used by both
+// populateVoiceList() (what shows in the dropdown) and resolveSelectedVoice()
+// (what actually gets assigned to an utterance), so a stale localStorage
+// value from before Entry 44 (e.g. a previously-picked network voice) can
+// never silently slip through and get applied even though it's no longer
+// in the visible list.
+function isVoiceAllowed(v) {
+  return v.localService === true;
+}
+
+function loadSavedVoiceURI() {
+  try {
+    selectedVoiceURI = localStorage.getItem(VOICE_STORAGE_KEY) || '';
+  } catch (err) {
+    console.error('Could not read saved voice preference:', err);
+    selectedVoiceURI = '';
+  }
+}
+
+function saveSelectedVoiceURI(uri) {
+  try {
+    localStorage.setItem(VOICE_STORAGE_KEY, uri);
+  } catch (err) {
+    console.error('Could not save voice preference:', err);
+  }
+}
+
+// Rebuilds the <select> options from whatever LOCAL voices are currently
+// available. Safe to call repeatedly (e.g. on every 'voiceschanged') —
+// re-applies selectedVoiceURI each time so the user's choice survives a
+// voice list that fills in gradually.
+function populateVoiceList() {
+  const allVoices = window.speechSynthesis.getVoices();
+  if (allVoices.length === 0) return; // nothing to show yet, wait for voiceschanged
+  const voices = allVoices.filter(isVoiceAllowed);
+
+  // English voices first (most likely relevant to this app's audience),
+  // then everything else, each group alphabetized by name.
+  const english = voices.filter(v => v.lang.toLowerCase().startsWith('en'))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const other = voices.filter(v => !v.lang.toLowerCase().startsWith('en'))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  voiceSelectEl.innerHTML = '<option value="">Browser default</option>';
+  for (const group of [english, other]) {
+    for (const v of group) {
+      const opt = document.createElement('option');
+      opt.value = v.voiceURI;
+      opt.textContent = `${v.name} (${v.lang})`;
+      voiceSelectEl.appendChild(opt);
+    }
+  }
+
+  // Re-apply saved selection now that options exist. If the saved voice
+  // isn't in this browser's *allowed* list (removed device, or a stale
+  // pre-Entry-44 network-voice pick), fall back to "Browser default"
+  // rather than silently applying something that shouldn't be used.
+  const match = voices.find(v => v.voiceURI === selectedVoiceURI);
+  voiceSelectEl.value = match ? selectedVoiceURI : '';
+  if (!match) {
+    selectedVoiceURI = '';
+    saveSelectedVoiceURI(''); // clean up the stale value so it doesn't keep tripping this fallback
+  }
+  voiceValueEl.textContent = match ? `${match.name} (${match.lang})` : 'browser default';
+}
+
+voiceSelectEl.addEventListener('change', () => {
+  selectedVoiceURI = voiceSelectEl.value;
+  saveSelectedVoiceURI(selectedVoiceURI);
+  const voices = window.speechSynthesis.getVoices().filter(isVoiceAllowed);
+  const match = voices.find(v => v.voiceURI === selectedVoiceURI);
+  voiceValueEl.textContent = match ? `${match.name} (${match.lang})` : 'browser default';
+});
+
+loadSavedVoiceURI();
+populateVoiceList(); // no-op if the list isn't ready yet — voiceschanged below covers that
+window.speechSynthesis.addEventListener('voiceschanged', populateVoiceList);
+
+// Looks up the live voice object matching selectedVoiceURI from whichever
+// speechSynthesis instance is about to be used (main window or the current
+// recycled iframe — see the design note above). Returns null for "Browser
+// default" or if the saved voice isn't found on this instance, in which
+// case the caller should simply not set utterance.voice.
+function resolveSelectedVoice(synth) {
+  if (!selectedVoiceURI) return null;
+  const voices = synth.getVoices();
+  const match = voices.find(v => v.voiceURI === selectedVoiceURI);
+  // Belt-and-suspenders: even if selectedVoiceURI somehow points at a
+  // disallowed (network) voice at this exact moment — e.g. another tab
+  // wrote a stale value to localStorage between loadSavedVoiceURI() and
+  // now — never hand it to an utterance. populateVoiceList() is the
+  // primary guard (keeps the dropdown/localStorage clean); this is the
+  // last line of defense at the actual point of use.
+  return (match && isVoiceAllowed(match)) ? match : null;
+}
 
 // Finds the end (exclusive-of-nothing, i.e. index right after the punctuation
 // mark) of the sentence starting at fromOffset. Falls back to the end of the
@@ -540,8 +680,18 @@ const textLoadStatusEl = document.getElementById('textLoadStatus');
 let readingActive = false;      // true from Start Reading click until the whole text finishes
 let isSpeakingChunk = false;    // true while a (possibly multi-word) utterance is actively speaking
 let manualCancel = false;       // true right before we intentionally cancel() due to mouth closing
-let cancelRequestedTime = null; // performance.now() when cancel() was requested — diagnostic, see onend
+let cancelRequestedTime = null; // performance.now() when cancel() was requested — diagnostic, see handleUtteranceStop()
 let currentUtterance = null;
+// Fix 1 (isolated testing via tts-stop-reliability-test.html, 6 configs / 120
+// cycles, confirmed 100% no-fire rate): `onend` never fires on this browser
+// after a manual cancel(), with or without simulated CPU load, chunking, or
+// iframe recycling. `speaking` was confirmed to flip false quickly (~15ms avg)
+// and reliably in the same tests, so it — not `onend` — is now the source of
+// truth for "has this utterance actually stopped." `onend` is kept wired as a
+// fallback (harmless if it never fires; picks up the same handler if some
+// future browser/version does fire it) rather than removed outright.
+let speakGeneration = 0;        // bumped on every speakFrom() call
+let speakingPollIntervalId = null; // defensive: cleared at the top of each new speakFrom()
 // --- Phase 9 (diagnostic, temporary): mobile TTS restart bug investigation ---
 // Working theory (PROGRESS.md Section 3c): on the affected mobile browser/TTS
 // voice, `onboundary` events don't fire reliably, so `lastBoundaryOffset` goes
@@ -558,12 +708,198 @@ const detectionGapValueEl = document.getElementById('detectionGapValue');
 const cancelStopGapValueEl = document.getElementById('cancelStopGapValue');
 const lastBoundaryAgoValueEl = document.getElementById('lastBoundaryAgoValue');
 
+// --- Phase 12d (diagnostic, temporary): sticky-word bug investigation ---
+// Not yet root-caused (PROGRESS.md 12d): some words occasionally stall,
+// needing a repeat/next-word mouth action to release. Two live hypotheses
+// this instruments, rather than guesses at blind:
+//   (a) TTS-side: the browser's onboundary events for a specific word are
+//       delayed, duplicated (fired more than once for the same word span,
+//       which highlightWordAt currently silently no-ops on), or otherwise
+//       irregular — same event-reliability family as the mobile 9a root
+//       cause, but happening here on a single-utterance-per-resume desktop
+//       session where call-frequency isn't the trigger.
+//   (b) Mouth-detection-side: a false-early mouth-close on a word whose
+//       phonetic content (e.g. bilabial/nasal-heavy words like "movement")
+//       has naturally low MAR movement range mid-word, tripping
+//       isMouthStopped before the word is actually done.
+// Not a fix — just visibility, same convention as the Entry 22-23 mobile
+// diagnostics. Remove once 12d is closed.
+let duplicateBoundaryCount = 0;
+let earlyCloseCount = 0;
+const lastWordTextValueEl = document.getElementById('lastWordTextValue');
+const lastWordGapValueEl = document.getElementById('lastWordGapValue');
+const lastWordExpectedValueEl = document.getElementById('lastWordExpectedValue');
+const duplicateBoundaryValueEl = document.getElementById('duplicateBoundaryValue');
+const earlyCloseValueEl = document.getElementById('earlyCloseValue');
+const lastCloseInRiskyWindowValueEl = document.getElementById('lastCloseInRiskyWindowValue');
+const lastCloseRiskyDeltaValueEl = document.getElementById('lastCloseRiskyDeltaValue');
+
+// Session-wide (NOT reset per-utterance, unlike boundaryEventCount) count of
+// every speechSynthesis.speak() call since this page was loaded. Testing a
+// specific hypothesis: student reported stalls starting rare/random-word
+// and getting MORE frequent and MORE random (old words re-sticking) across
+// repeated test runs in one session — that pattern doesn't fit a per-word
+// cadence bug (which would hit the same word content the same way each
+// time). It fits Entry 24's already-confirmed root cause instead: repeated
+// speak() calls in general (not just chained ones) wedge Chromium's speech
+// engine over a session. This counter makes that directly checkable against
+// stall frequency, rather than guessing.
+let sessionSpeakCallCount = 0;
+const sessionSpeakCountValueEl = document.getElementById('sessionSpeakCountValue');
+
+// --- Phase 9a "iframe recycle" experiment (live test, Entry 39) -----------
+// Candidate fix for the Entry 24/Entry 33 speak()-count freeze. Idea: spawn
+// a hidden same-origin iframe and speak through ITS speechSynthesis
+// instance instead of the main window's, destroying/recreating it every N
+// calls (well ahead of the observed #10-22 freeze range) — if the leak
+// lives in per-frame JS-bound engine state, recycling the frame should
+// reset it before it ever wedges.
+//
+// Isolated synthetic testing (standalone harness, no MediaPipe) could NOT
+// reproduce the original freeze at all across several attempts (clean
+// calls, interrupted calls, randomized timing, even real MediaPipe +
+// synthetic CPU load) — only an unrelated, milder bug showed up under
+// artificial call-overlap. So this is being tested live, in the real app,
+// against a real reading session where the freeze has actually happened
+// before, rather than guessed at synthetically. See PROGRESS.md Entry 39.
+//
+// FLAG: set to false to fully revert to the pre-existing behavior (main
+// window's speechSynthesis, no recycling, byte-for-byte the old code path)
+// with zero other changes needed.
+const IFRAME_TTS_RECYCLE_ENABLED = true;
+
+// Fix 3b's flat MIN_TIGHT_GATING_MS window was superseded by Fix 3c
+// (syllable/consonant-risk-aware gating — see currentWordRiskyTimings /
+// RISKY_CONSONANTS / RISK_WINDOW_HALF_MS below) before it was ever tested
+// live, per the student's own prior experience that the sticky-word bug on
+// several words was already well-established and unlikely to be fixed by a
+// flat window. Left this note instead of the dead constant so the "why did
+// v2 skip straight to v3" jump is traceable later.
+const IFRAME_RECYCLE_EVERY_N_CALLS = 6; // safely below the lowest ever-observed real freeze (#10)
+
+let ttsIframe = null;
+let ttsRecycleCount = 0;
+const ttsRecycleCountValueEl = document.getElementById('ttsRecycleCountValue');
+
+// ttsEngine.synth / ttsEngine.UtteranceCtor are what every TTS call site
+// below actually uses — swapping these two references is the entire
+// mechanism, nothing else about speakFrom()'s logic changes.
+const ttsEngine = {
+  synth: window.speechSynthesis,
+  UtteranceCtor: window.SpeechSynthesisUtterance,
+};
+
+// Bug fix (found via student report + isolated diagnostic, see PROGRESS.md):
+// every cancel() call site OUTSIDE speakFrom() (onMouthClosed, the
+// looking-away/no-face gate trip, word-click resync, calibration start,
+// startBtn reset) used to call `ttsEngine.synth.cancel()` directly. That's
+// wrong the moment a recycle has happened between "this utterance started
+// speaking" and "we need to cancel it now" — cancel() would fire on the
+// NEW (empty) iframe's synth while the utterance actually playing is
+// orphaned on the OLD iframe's synth, completely unstoppable through the
+// normal path. Invisible with the default voice (both "orphaned" and
+// "new" utterances sound identical); became audible as two overlapping
+// voices once a distinct custom voice was in play. Fix: track exactly
+// which synth is currently speaking, and have every cancel() site use
+// THIS, not whatever ttsEngine.synth happens to be right now.
+let activeSpeechSynth = window.speechSynthesis;
+
+function cancelActiveSpeech() {
+  activeSpeechSynth.cancel();
+}
+
+function spawnFreshTtsIframe() {
+  if (ttsIframe) {
+    ttsIframe.remove();
+  }
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  iframe.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(iframe);
+  // A bare same-origin iframe's contentWindow (and its speechSynthesis /
+  // SpeechSynthesisUtterance) is available synchronously right after
+  // append — no need to wait for a 'load' event before using it.
+  ttsIframe = iframe;
+  ttsEngine.synth = iframe.contentWindow.speechSynthesis;
+  ttsEngine.UtteranceCtor = iframe.contentWindow.SpeechSynthesisUtterance;
+  ttsRecycleCount += 1;
+  if (ttsRecycleCountValueEl) ttsRecycleCountValueEl.textContent = String(ttsRecycleCount);
+  console.log(`[Phase 9a-iframe] fresh TTS iframe spawned (recycle #${ttsRecycleCount})`);
+}
+
+// Called right before each speak() — recycles BEFORE the call that would
+// land on a recycle boundary, same convention as the benchmark harness
+// (Entry 38): with IFRAME_RECYCLE_EVERY_N_CALLS=6, calls 1-6 use frame A,
+// call 7 gets a fresh frame B, etc. sessionSpeakCallCount is incremented
+// right after this runs (see speakFrom), so "the call about to happen" is
+// sessionSpeakCallCount + 1.
+function maybeRecycleTtsEngine() {
+  if (!IFRAME_TTS_RECYCLE_ENABLED) return;
+  const nextCallNumber = sessionSpeakCallCount + 1;
+  if (nextCallNumber === 1 || (nextCallNumber - 1) % IFRAME_RECYCLE_EVERY_N_CALLS === 0) {
+    spawnFreshTtsIframe();
+  }
+}
+
+if (IFRAME_TTS_RECYCLE_ENABLED) {
+  spawnFreshTtsIframe(); // set up the first frame before any speak() call happens
+}
+
 let baseOffset = 0;             // char offset into currentText where currentUtterance's text starts
 let lastBoundaryOffset = 0;     // charIndex within currentUtterance of the most recent word boundary
 let wordSpans = [];             // { span, start, end } built from currentText
 let activeWordIndex = -1;
 let lastWordBoundaryTime = 0;        // Phase 11b (fixed): performance.now() at the most recent onboundary
 let currentSpokenWordExpectedMs = 0; // expected duration for the word currently being spoken
+// Fix 3c: estimated ms-from-word-start offsets where a lip-closing
+// consonant is expected in the CURRENT word, recomputed alongside
+// currentSpokenWordExpectedMs at every point that resets it (highlightWordAt,
+// speakFrom). Empty array = no risky sound detected, use fast/loose gating
+// for the whole word.
+let currentWordRiskyTimings = [];
+
+// Fix 3c: syllable/consonant-risk-aware gating (replaces Fix 3b's flat
+// grace-window test, skipped before live testing — see the note near
+// IFRAME_RECYCLE_EVERY_N_CALLS above). Detects likely lip-closing
+// consonants (bilabial: b, m, p) inside a word and estimates roughly when,
+// in ms from the word's start, that sound would land — using the
+// consonant's character position scaled against the word's total expected
+// duration as a rough proxy for a uniform speaking rate across it. We don't
+// have real phoneme-level timing, so this is a proportional estimate, not
+// exact.
+// Fix 3c-2 (correction): v1 skipped a risky consonant at position 0,
+// reasoning "the natural mouth-open transition into the word already covers
+// it." Live testing on "moved"/"performance"/"paused" (all word-initial m/p,
+// no interior b/m/p) showed the opposite — producing a b/m/p sound at all
+// requires closing the lips FIRST, so a word-initial one is a real closure
+// moment right when elapsed time is lowest, which v1 left fully
+// unprotected. Now included: timing≈0ms for a position-0 match, same
+// risk-window treatment as any mid-word one.
+const RISKY_CONSONANTS = /[bmp]/gi;
+function estimateRiskyConsonantTimings(word, expectedDurationMs) {
+  const timings = [];
+  if (!word || word.length < 2 || expectedDurationMs <= 0) return timings;
+  RISKY_CONSONANTS.lastIndex = 0;
+  let match;
+  while ((match = RISKY_CONSONANTS.exec(word)) !== null) {
+    const proportion = match.index / word.length;
+    timings.push(Math.round(proportion * expectedDurationMs));
+  }
+  return timings;
+}
+
+// Unvalidated starting guess — how wide (ms, each side of an estimated
+// risky-consonant moment) the cautious/tight window is. Needs real-world
+// tuning once this is live: too narrow and it won't catch the dip in time
+// (sticky-word bug returns); too wide and it starts re-creating the
+// original flat-window overshoot around every risky word.
+const RISK_WINDOW_HALF_MS = 120;
+function isWithinRiskyWindow(elapsedMs, riskyTimings) {
+  for (let i = 0; i < riskyTimings.length; i++) {
+    if (Math.abs(elapsedMs - riskyTimings[i]) <= RISK_WINDOW_HALF_MS) return true;
+  }
+  return false;
+}
 
 // --- Phase 12c: auto-scroll to active word ---
 // Follows .word.active as reading progresses (via highlightWordAt, the single
@@ -812,10 +1148,10 @@ const MAX_BASE_WORD_MS = 800;
 //      top for hard failures (a stuck word, a real head-pose gate trip) —
 //      slow drift is the wrong shape for a discrete event.
 //   3. Reads off this user's CALIBRATED thresholds (YAW_THRESHOLD,
-//      PITCH_THRESHOLD, currentWordExpectedMs from Phase 11's personalized
-//      cadence), not raw values — so a twitchy mumbler and a slow one both
-//      see "trouble" mean the same thing: how close they are to THEIR OWN
-//      threshold, not an absolute scale.
+//      PITCH_THRESHOLD, currentSpokenWordExpectedMs from Phase 11's
+//      personalized cadence), not raw values — so a twitchy mumbler and a
+//      slow one both see "trouble" mean the same thing: how close they are
+//      to THEIR OWN threshold, not an absolute scale.
 //   4. Hue is paired with opacity+saturation, not used alone, for red/green
 //      colorblind accessibility.
 //
@@ -1031,7 +1367,7 @@ function startCalibration() {
   // at the same time, and this reuses the same safe-reset pattern as the
   // Start Reading button (cancel() is safe even if nothing is speaking).
   manualCancel = true;
-  speechSynthesis.cancel();
+  cancelActiveSpeech();
   isSpeakingChunk = false;
   readingActive = false;
   speechStateEl.textContent = 'idle (calibrating)';
@@ -1679,7 +2015,7 @@ function setCurrentText(text, sourceLabel, opts = {}) {
   const persist = opts.persist !== false;
 
   manualCancel = true;
-  speechSynthesis.cancel();
+  cancelActiveSpeech();
   isSpeakingChunk = false;
   readingActive = false;
 
@@ -1915,7 +2251,7 @@ function onWordClick(wordIndex) {
 
   if (isSpeakingChunk) {
     manualCancel = true;
-    speechSynthesis.cancel();
+    cancelActiveSpeech();
     isSpeakingChunk = false;
   }
 
@@ -1936,7 +2272,33 @@ function onWordClick(wordIndex) {
 
 function highlightWordAt(charIndex) {
   const idx = wordSpans.findIndex(w => charIndex >= w.start && charIndex < w.end);
-  if (idx === -1 || idx === activeWordIndex) return;
+  if (idx === -1) return;
+
+  // Phase 12d diagnostic: a boundary event landed but mapped into the
+  // SAME word that's already active — either a genuinely duplicate event
+  // for one word, or evidence the browser's charIndex for this word drifted
+  // backward/stayed put instead of advancing. Either way it means this
+  // boundary did NOT refresh lastWordBoundaryTime/currentSpokenWordExpectedMs,
+  // which is exactly the kind of gap that could read as a "stall."
+  if (idx === activeWordIndex) {
+    duplicateBoundaryCount += 1;
+    duplicateBoundaryValueEl.textContent = String(duplicateBoundaryCount);
+    console.log(`[Phase 12d diag] duplicate/non-advancing boundary for already-active word "${wordSpans[idx].span.textContent}" (charIndex=${charIndex})`);
+    return;
+  }
+
+  // Phase 12d diagnostic: how long did THIS word's boundary event actually
+  // take to arrive, vs. how long the PREVIOUS word was expected to take?
+  // A stall shows up here as gapMs far exceeding prevExpectedMs, tagged
+  // with exactly which word it landed on.
+  const nowForDiag = performance.now();
+  const prevExpectedMs = currentSpokenWordExpectedMs;
+  const gapMs = Math.round(nowForDiag - lastWordBoundaryTime);
+  const newWordText = wordSpans[idx].span.textContent;
+  console.log(`[Phase 12d diag] boundary -> "${newWordText}" | gap since prev boundary: ${gapMs}ms (prev word expected ~${Math.round(prevExpectedMs)}ms)`);
+  lastWordTextValueEl.textContent = newWordText;
+  lastWordGapValueEl.textContent = `${gapMs}ms`;
+  lastWordExpectedValueEl.textContent = `${Math.round(prevExpectedMs)}ms`;
 
   if (activeWordIndex !== -1) {
     wordSpans[activeWordIndex].span.classList.remove('active');
@@ -1966,6 +2328,7 @@ function highlightWordAt(charIndex) {
   // freeze bug, Section 3) rather than reader-mouth behavior.
   lastWordBoundaryTime = performance.now();
   currentSpokenWordExpectedMs = estimateWordDuration(wordSpans[idx].span.textContent);
+  currentWordRiskyTimings = estimateRiskyConsonantTimings(wordSpans[idx].span.textContent, currentSpokenWordExpectedMs);
 }
 
 // Extract yaw/pitch (in degrees) from MediaPipe's facialTransformationMatrix.
@@ -2058,21 +2421,45 @@ function updateMouthState(mar) {
 
   if (mouthState === 'closed' && mar > OPEN_THRESHOLD) {
     mouthState = 'open';
-    mouthOpenStartTime = now;
-    currentWordExpectedMs = estimateWordDuration(getWordForCadence());
-    cadenceValueEl.textContent = `0 / ${currentWordExpectedMs}ms`;
     onMouthOpen();
   } else if (mouthState === 'open') {
-    // Phase 6b: how far into this word's expected mouthing time are we?
-    const elapsedMs = now - mouthOpenStartTime;
-    cadenceValueEl.textContent = `${Math.round(elapsedMs)} / ${currentWordExpectedMs}ms`;
+    // Phase 12d fix (root cause confirmed via live log: elapsed=20303ms
+    // against expected=800ms on "approach", 40+ words into one open
+    // stretch). This used to measure elapsed time since the mouth last
+    // transitioned closed->open — fine for a single word, but Phase 6a's
+    // whole point is keeping the mouth open across many words during
+    // smooth reading, so that clock went stale within a few words and then
+    // sat there for the rest of the stretch. Once "elapsed" is that far
+    // past any word's expected duration, dynamicRangeThreshold is
+    // permanently pinned to the loose CADENCE_OVER_FACTOR value — so an
+    // ordinary mid-word dip (a lip-closure syllable in "approach",
+    // "movement", "information") reads as a real stop.
+    // Fix: reuse the per-word clock (lastWordBoundaryTime/
+    // currentSpokenWordExpectedMs) Phase 11b already introduced for
+    // trouble-shading, which is refreshed on every real onboundary
+    // (highlightWordAt) and primed on every resume (speakFrom) — always
+    // current regardless of mouth state. One clock instead of two.
+    const elapsedMs = now - lastWordBoundaryTime;
+    cadenceValueEl.textContent = `${Math.round(elapsedMs)} / ${Math.round(currentSpokenWordExpectedMs)}ms`;
 
     // Dynamic range threshold, built on top of Option A's fixed one: tighten
     // it while we're still under the word's expected duration (an early
     // close-looking dip is more likely mid-word noise than a real stop), and
     // relax it once we're past expected duration (the word's had its time;
     // don't make the reader hold their mouth extra to prove it's really over).
-    const dynamicRangeThreshold = elapsedMs < currentWordExpectedMs
+    // Fix 3c (replaces Fix 3b's flat MIN_TIGHT_GATING_MS window): v1
+    // (elapsed < full average word duration) fixed the overshoot but
+    // reopened the mid-word dip false-stop this tightening was originally
+    // built for (e.g. "movement", "approach" — see the comment above). v2
+    // (a flat 150ms window on every word) was untested when the student's
+    // own prior experience already showed the sticky-word bug on several
+    // words to be persistent, so we skipped straight to this targeted
+    // version: tighten ONLY in a short window around an estimated
+    // lip-closing-consonant moment (currentWordRiskyTimings, computed per
+    // word in highlightWordAt()/speakFrom() — see its definition), loose
+    // everywhere else in the word, including its entire duration if it has
+    // no risky sound at all.
+    const dynamicRangeThreshold = isWithinRiskyWindow(elapsedMs, currentWordRiskyTimings)
       ? STOPPED_RANGE_THRESHOLD * CADENCE_UNDER_FACTOR
       : STOPPED_RANGE_THRESHOLD * CADENCE_OVER_FACTOR;
 
@@ -2085,7 +2472,7 @@ function updateMouthState(mar) {
     // on-screen version of the theory rather than something to take on faith.
     movementRangeValueEl.textContent =
       `${movementRange.toFixed(4)} (need < ${dynamicRangeThreshold.toFixed(4)}, ` +
-      `${elapsedMs < currentWordExpectedMs ? 'under' : 'over'} phase)`;
+      `${elapsedMs < currentSpokenWordExpectedMs ? 'under' : 'over'} phase)`;
 
     // Two conditions, both required (Option A base case):
     //  1. Current MAR is actually down in the closed region (not just "not
@@ -2118,6 +2505,31 @@ function updateMouthState(mar) {
       // close), not overwritten by the per-frame movementRangeValueEl update
       // above. Stays on screen exactly as-is until the next close.
       detectionGapValueEl.textContent = `${gapMs}ms`;
+
+      // Fix 3c/3c-2 tuning diagnostic: was this detected stop inside the
+      // tight risky-consonant window, or out in the loose zone? And how far
+      // (ms) from the nearest estimated risky-consonant moment? This is the
+      // one piece of data missing to tune RISK_WINDOW_HALF_MS precisely
+      // instead of guessing at a new width — same real-data approach as the
+      // Entry 23 clamp-bounds fix.
+      const nearestRiskyDelta = currentWordRiskyTimings.length > 0
+        ? Math.min(...currentWordRiskyTimings.map((rt) => Math.abs(elapsedMs - rt)))
+        : null;
+      const wasInRiskyWindow = isWithinRiskyWindow(elapsedMs, currentWordRiskyTimings);
+      const underExpected = elapsedMs < currentSpokenWordExpectedMs;
+      const activeWordText = activeWordIndex !== -1 ? wordSpans[activeWordIndex].span.textContent : '';
+      if (underExpected) {
+        earlyCloseCount += 1;
+        earlyCloseValueEl.textContent = String(earlyCloseCount);
+      }
+      console.log(
+        `[Fix 3c/3c-2 diag] mouth-close on "${activeWordText}" | elapsed=${Math.round(elapsedMs)}ms expected=${Math.round(currentSpokenWordExpectedMs)}ms | ` +
+        `${underExpected ? 'EARLY (under expected)' : 'over expected'} | riskyTimings=[${currentWordRiskyTimings.join(',')}] | ` +
+        `inRiskyWindow=${wasInRiskyWindow} | nearestRiskyDelta=${nearestRiskyDelta === null ? 'n/a (no risky sound)' : Math.round(nearestRiskyDelta) + 'ms'}`
+      );
+      lastCloseInRiskyWindowValueEl.textContent = `${wasInRiskyWindow} (word: "${activeWordText}")`;
+      lastCloseRiskyDeltaValueEl.textContent = nearestRiskyDelta === null ? 'n/a' : `${Math.round(nearestRiskyDelta)}ms`;
+
       mouthState = 'closed';
       onMouthClosed();
     }
@@ -2126,6 +2538,11 @@ function updateMouthState(mar) {
 }
 
 function onMouthOpen() {
+  // Phase 12d diagnostic: if a "repeat/next-word mouth action" is what
+  // releases a stall, THIS call is that action landing — log which guard
+  // (if any) makes it a no-op, so a stall can be traced to "the resume
+  // never actually fired" vs. "it fired but resumed from the wrong place."
+  console.log(`[Phase 12d diag] onMouthOpen() | isFacingScreen=${isFacingScreen} readingActive=${readingActive} isSpeakingChunk=${isSpeakingChunk} resumeOffset=${baseOffset + lastBoundaryOffset}`);
   if (!isFacingScreen) return; // gated: don't resume while looking away
   if (!readingActive) return; // no active reading session
   if (isSpeakingChunk) return; // already flowing, nothing to do
@@ -2135,6 +2552,7 @@ function onMouthOpen() {
 }
 
 function onMouthClosed() {
+  console.log(`[Phase 12d diag] onMouthClosed() | isSpeakingChunk=${isSpeakingChunk}`);
   if (!isSpeakingChunk) return;
 
   // Stop the current utterance with cancel() rather than pause() — cancel()
@@ -2144,7 +2562,7 @@ function onMouthClosed() {
   // completed word boundary) so the next mouth-open can pick up from there.
   manualCancel = true;
   cancelRequestedTime = performance.now();
-  speechSynthesis.cancel();
+  cancelActiveSpeech();
   isSpeakingChunk = false;
   speechStateEl.textContent = 'waiting for mouth to open';
 }
@@ -2162,6 +2580,10 @@ function speakFrom(offset) {
   // only meaningful measured within one utterance's boundary stream.
   boundaryEventCount = 0;
   boundaryCountValueEl.textContent = '0';
+  duplicateBoundaryCount = 0;
+  duplicateBoundaryValueEl.textContent = '0';
+  earlyCloseCount = 0;
+  earlyCloseValueEl.textContent = '0';
 
   // Phase 11b bugfix: prime the per-word cadence clock for the word at the
   // resume point right away, rather than only waiting for onboundary/
@@ -2175,6 +2597,9 @@ function speakFrom(offset) {
   currentSpokenWordExpectedMs = resumeWordIdx !== -1
     ? estimateWordDuration(wordSpans[resumeWordIdx].span.textContent)
     : 0;
+  currentWordRiskyTimings = resumeWordIdx !== -1
+    ? estimateRiskyConsonantTimings(wordSpans[resumeWordIdx].span.textContent, currentSpokenWordExpectedMs)
+    : [];
 
   // Phase 8, final (Entry 16): one utterance per resume, no chaining. Two
   // chaining attempts within this same session both failed with
@@ -2188,7 +2613,42 @@ function speakFrom(offset) {
   // point falls inside, and holds for the rest of that utterance. Known,
   // accepted limitation: during smooth continuous reading (few real mouth
   // closes, by design — see Phase 6a), tone may rarely change.
-  currentUtterance = new SpeechSynthesisUtterance(currentText.slice(offset));
+  maybeRecycleTtsEngine(); // Phase 9a-iframe experiment — no-op if the flag above is off
+
+  // Defensive: if a previous utterance's poll is somehow still running when a
+  // fresh speakFrom() fires, stop it explicitly rather than relying only on
+  // the generation check inside its own callback.
+  if (speakingPollIntervalId !== null) {
+    clearInterval(speakingPollIntervalId);
+    speakingPollIntervalId = null;
+  }
+  const myGeneration = ++speakGeneration;
+  const synthRef = ttsEngine.synth; // captured now in case a later recycle swaps ttsEngine.synth mid-flight
+  // Bug fix: this is also the ONE place activeSpeechSynth gets updated —
+  // every external cancel() call site (onMouthClosed, gate trips, word-click,
+  // calibration start, startBtn) now cancels via activeSpeechSynth instead of
+  // the live (possibly-since-recycled) ttsEngine.synth. See the comment above
+  // its declaration for the full "orphaned utterance" bug this fixes.
+  activeSpeechSynth = synthRef;
+  let stopHandled = false; // local to this call — whichever of onend/poll fires first wins, the other is a no-op
+
+  currentUtterance = new ttsEngine.UtteranceCtor(currentText.slice(offset));
+
+  // Phase 12b Stage A: resolved from the MAIN WINDOW's voice list, not the
+  // (possibly brand-new, still-async-loading) recycled iframe's own list.
+  // Each fresh iframe needs its own 'voiceschanged' round-trip before
+  // getVoices() returns anything — right after a recycle that list can
+  // still be empty, which was silently degrading a chosen voice back to
+  // default exactly when a recycle landed. The main window's list is
+  // loaded once at startup and never goes stale, and Chromium resolves a
+  // voice by its voiceURI at synthesis time regardless of which frame's
+  // SpeechSynthesis object the voice object came from, so this is safe to
+  // use even though `synthRef` (the frame that will actually speak) may be
+  // a recycled iframe.
+  const resolvedVoice = resolveSelectedVoice(window.speechSynthesis);
+  if (resolvedVoice) {
+    currentUtterance.voice = resolvedVoice;
+  }
 
   // Phase 11: PERSONALIZED_RATE is applied unconditionally now (it defaults
   // to 1.0 — the untouched Web Speech default — until the user calibrates,
@@ -2220,22 +2680,33 @@ function speakFrom(offset) {
     highlightWordAt(baseOffset + event.charIndex);
   };
 
-  currentUtterance.onend = () => {
+  // Shared by both onend (fallback, effectively never fires — see the
+  // comment on speakGeneration above) and the speaking-property poll below
+  // (primary, confirmed reliable). Whichever fires first handles the stop;
+  // the other becomes a no-op via stopHandled/generation checks.
+  function handleStop() {
+    if (stopHandled) return;
+    if (myGeneration !== speakGeneration) return; // superseded by a newer speakFrom()
+    stopHandled = true;
+    if (speakingPollIntervalId !== null) {
+      clearInterval(speakingPollIntervalId);
+      speakingPollIntervalId = null;
+    }
+
     isSpeakingChunk = false;
     if (manualCancel) {
-      // This 'end' event fired because WE called cancel() (closing the mouth
-      // or looking away), not because the text actually finished. Chromium
-      // fires 'end' either way.
+      // This utterance stopped because WE called cancel() (closing the mouth
+      // or looking away), not because the text actually finished.
       //
-      // Diagnostic (mobile testing session): how long between us requesting
-      // cancel() and the browser actually confirming it stopped? On desktop
-      // this has always been assumed near-instant. If mobile shows a real
-      // gap here, that's direct evidence the engine keeps talking for a
-      // while after cancel() is called — a platform-level TTS quirk, not a
-      // detection bug on our side (which the earlier tests already cleared).
+      // Diagnostic: how long between us requesting cancel() and `speaking`
+      // actually confirming it stopped? Isolated testing (see the comment on
+      // speakGeneration) showed this is consistently small (~15ms avg) even
+      // under simulated CPU load — evidence cancel() itself is not the slow
+      // part; the up-to-~300-400ms detection window is the far bigger factor
+      // in any perceived overshoot.
       if (cancelRequestedTime !== null) {
         const stopGapMs = Math.round(performance.now() - cancelRequestedTime);
-        console.log(`[Phase 9 diag] cancel() to onend gap: ${stopGapMs}ms`);
+        console.log(`[Phase 9 diag] cancel() to stop-confirmed gap: ${stopGapMs}ms`);
         cancelStopGapValueEl.textContent = `${stopGapMs}ms`;
         cancelRequestedTime = null;
       }
@@ -2243,11 +2714,32 @@ function speakFrom(offset) {
       return;
     }
     finishReading();
-  };
+  }
+
+  currentUtterance.onend = handleStop;
 
   isSpeakingChunk = true;
-  speechSynthesis.speak(currentUtterance);
+  sessionSpeakCallCount += 1;
+  sessionSpeakCountValueEl.textContent = String(sessionSpeakCallCount);
+  console.log(`[Phase 12d diag] speak() call #${sessionSpeakCallCount} this session (${IFRAME_TTS_RECYCLE_ENABLED ? 'iframe recycle #' + ttsRecycleCount : 'main window, no recycling'})`);
+  ttsEngine.synth.speak(currentUtterance);
   speechStateEl.textContent = 'speaking';
+
+  // Fix 1: poll `speaking` instead of trusting `onend`. 20ms tick — cheap
+  // (single boolean read) and well under the ~15ms gaps seen in testing, so
+  // it won't itself be the bottleneck in the numbers it reports.
+  speakingPollIntervalId = setInterval(() => {
+    if (myGeneration !== speakGeneration) {
+      // A newer speakFrom() has already started; this poll is stale.
+      clearInterval(speakingPollIntervalId);
+      speakingPollIntervalId = null;
+      return;
+    }
+    if (synthRef.speaking) return; // still genuinely speaking, keep polling
+    clearInterval(speakingPollIntervalId);
+    speakingPollIntervalId = null;
+    handleStop();
+  }, 20);
 }
 
 function finishReading() {
@@ -2270,9 +2762,13 @@ startBtn.addEventListener('click', () => {
   // to be accurate. speechSynthesis state has proven flaky enough this session
   // that relying on our own flags alone was leaving the button stuck unusable
   // after a full read-through. cancel() is safe to call even if nothing is
-  // currently speaking.
+  // currently speaking. Belt-and-suspenders here specifically (cancel both
+  // the tracked active synth AND whatever's live right now) since this is
+  // the explicit hard-reset path — cheap insurance against any lingering
+  // orphaned utterance on an old recycled iframe.
   manualCancel = true;
-  speechSynthesis.cancel();
+  cancelActiveSpeech();
+  ttsEngine.synth.cancel();
   isSpeakingChunk = false;
   readingActive = false;
 
@@ -2291,6 +2787,43 @@ startBtn.addEventListener('click', () => {
   // speaking immediately from the beginning. Otherwise wait for mouth-open.
   if (mouthState === 'open' && isFacingScreen) {
     speakFrom(0);
+  }
+});
+
+// --- Tab/window visibility safety gate ---------------------------------
+// predictLoop() is scheduled via requestAnimationFrame (scheduleNextFrame),
+// which browsers throttle heavily or suspend entirely once the tab/window
+// is backgrounded — switching to a completely different application (e.g.
+// Edge) backgrounds Chrome much harder than switching between Chrome tabs.
+// speechSynthesis has no such throttling and keeps talking regardless.
+// That means every mouth/face safety check in this file — head-pose gating,
+// the Phase 9b no-face timeout, even ordinary mouth-close detection — stops
+// running the moment the tab is hidden, because predictLoop itself is what
+// stops running. This is a distinct, more fundamental gap than Phase 9b:
+// that fix only covers "camera sees no face while the tab is still visible
+// and predictLoop is still running normally."
+// Fix: react directly to the Page Visibility API instead of depending on
+// predictLoop to notice anything. On hidden, stop speech immediately and
+// force mouthState closed so a stale "still open" reading from before
+// backgrounding can't cause a blind resume the instant the tab returns.
+// On visible again, deliberately do NOT auto-resume — the next real
+// predictLoop frame re-establishes the actual current mouth/face state
+// from scratch, same "recovery is free" pattern already used for
+// no-face/looking-away recovery elsewhere in this file. noFaceSince is
+// cleared too, so background time isn't counted against the reader once
+// frames resume.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    console.log(`[visibility] tab hidden | readingActive=${readingActive} mouthState=${mouthState}`);
+    if (readingActive) {
+      onMouthClosed();
+      mouthState = 'closed';
+      mouthStateEl.textContent = mouthState;
+      facingStateEl.textContent = 'tab hidden — reading paused';
+    }
+    noFaceSince = null;
+  } else {
+    console.log('[visibility] tab visible again — waiting for a fresh mouth/face read before resuming');
   }
 });
 

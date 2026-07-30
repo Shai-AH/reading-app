@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mumblew — Phase 13.5 benchmark round 2 (WebGPU + pre-buffering)</title>
+<style>
+  body {
+    background: #0D1417;
+    color: #EDEDE8;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    max-width: 860px;
+    margin: 24px auto;
+    padding: 0 20px 60px;
+    line-height: 1.5;
+  }
+  h1 { font-size: 18px; }
+  h2 { font-size: 15px; margin-top: 28px; color: #2FBF9A; }
+  p.note { color: #9AA6A3; font-size: 13px; }
+  .panel {
+    background: #16221F;
+    border: 1px solid #26363A;
+    border-radius: 8px;
+    padding: 14px;
+    margin-top: 10px;
+  }
+  label { font-size: 13px; margin-right: 14px; }
+  select, button {
+    background: #1C2A27;
+    color: #EDEDE8;
+    border: 1px solid #35494E;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    margin-right: 8px;
+    margin-bottom: 6px;
+  }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button:hover:not(:disabled) { border-color: #2FBF9A; }
+  #status { font-size: 13px; color: #F0AC2E; margin-top: 8px; min-height: 18px; }
+  #fpsReadout { font-family: monospace; font-size: 13px; color: #9AA6A3; margin-top: 6px; }
+  #log {
+    background: #0A0F11;
+    border: 1px solid #26363A;
+    border-radius: 8px;
+    padding: 10px;
+    margin-top: 10px;
+    font-family: monospace;
+    font-size: 12.5px;
+    color: #C7D0CD;
+    max-height: 420px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  video { display: none; }
+</style>
+</head>
+<body>
+
+  <h1>Mumblew — Phase 13.5 benchmark round 2</h1>
+  <p class="note">
+    Tests two things raised in the last discussion: (1) whether Kokoro's
+    <code>device: "webgpu"</code> backend actually cuts synthesis latency
+    vs. the WASM numbers from Entry 35, and (2) whether pre-buffering the
+    next sentence while the current one is being "read" hides whatever
+    latency is left, even with MediaPipe running concurrently.
+    Fully isolated — doesn't touch <code>main.js</code>/<code>index.html</code>.
+  </p>
+  <p class="note">
+    <strong>Run this via a local static server</strong> (e.g. <code>npx serve</code>
+    or <code>python3 -m http.server</code>), not by double-clicking the file —
+    the worker's <code>import</code> needs a real origin. Also don't deploy
+    this through Vercel as-is: the current <code>vercel.json</code> CSP
+    doesn't allow the Hugging Face model-file domains Kokoro downloads from,
+    it would just get blocked.
+  </p>
+
+  <div class="panel">
+    <h2 style="margin-top:0;">1. Load model</h2>
+    <label>Device:
+      <select id="deviceSelect">
+        <option value="wasm">wasm</option>
+        <option value="webgpu">webgpu</option>
+      </select>
+    </label>
+    <label>dtype:
+      <select id="dtypeSelect">
+        <option value="q8">q8</option>
+        <option value="fp32">fp32</option>
+        <option value="fp16">fp16</option>
+        <option value="q4">q4</option>
+      </select>
+    </label>
+    <button id="loadModelBtn">Load model</button>
+    <button id="resetWorkerBtn">Reset worker</button>
+    <p class="note">dtype auto-suggests fp32 for webgpu, q8 for wasm (Kokoro's own recommendation) — override if you want to compare.</p>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin-top:0;">2. Reader pace</h2>
+    <p class="note" style="margin-top:0;">
+      Phase 11 calibrates <code>baseWordMs</code>/<code>msPerSyllable</code>
+      <em>per person</em> — the earlier flat "400ms/word" guess in this
+      harness was replaced with the app's real per-word formula
+      (<code>baseWordMs + syllables × msPerSyllable</code>), so different
+      readers can actually be tested instead of assumed. Pick a preset or
+      type your own — this is exactly what a fast vs. slow mumbler
+      comparison needs.
+    </p>
+    <label>Preset:
+      <select id="pacePresetSelect">
+        <option value="yours">Your calibration (571 / 56.6)</option>
+        <option value="default">App defaults, uncalibrated (120 / 220)</option>
+        <option value="fast">Fast mumbler guess (half your base, half default per-syll)</option>
+        <option value="veryfast">Very fast mumbler guess (quarter your base, quarter default per-syll)</option>
+        <option value="custom">Custom (type below)</option>
+      </select>
+    </label>
+    <br>
+    <label>Base word ms: <input type="number" id="baseWordMsInput" value="571" step="1" style="width:70px;"></label>
+    <label>ms per syllable: <input type="number" id="perSyllableMsInput" value="56.6" step="0.1" style="width:70px;"></label>
+    <p class="note" id="paceSummary"></p>
+  </div>
+
+  <div class="panel">
+    <h2 style="margin-top:0;">3. Tests</h2>
+    <button id="latencyTestBtn" disabled>Run raw latency test</button>
+    <button id="pipelineTestBtn" disabled>Run pre-buffer pipeline test</button>
+    <button id="streamTestBtn" disabled>Run streaming test</button>
+    <br>
+    <label>Pre-buffer depth (sentences ahead):
+      <select id="bufferDepthSelect">
+        <option value="1">1 (Entry 36 baseline)</option>
+        <option value="2">2</option>
+        <option value="3">3</option>
+      </select>
+    </label>
+    <p class="note" style="margin-top:4px;">
+      Depth only changes how far ahead the queue is <em>allowed</em> to run —
+      there's still only one Kokoro instance in the worker, so requests are
+      dispatched to it one at a time regardless of depth. Deeper buffering can
+      absorb bursts/variance and hide sentence-0-style cold starts further into
+      the run, but it can't fix a sustained case where synth time &gt; read
+      time per sentence — that's a throughput ceiling, not a buffering
+      problem, and the summary below calls it out explicitly if so.
+    </p>
+    <br>
+    <label>MediaPipe delegate for concurrent test:
+      <select id="delegateSelect">
+        <option value="GPU">GPU (matches main app)</option>
+        <option value="CPU">CPU</option>
+      </select>
+    </label>
+    <button id="concurrentTestBtn" disabled>Run pipeline + webcam concurrent test</button>
+    <button id="baselineFpsBtn">Run MediaPipe-only baseline (no TTS, 8s)</button>
+    <button id="playLastBtn" disabled>Play last synthesized sentence</button>
+    <p class="note">
+      Raw latency: how long <code>tts.generate()</code> takes per sentence,
+      sequential, no overlap — directly comparable to Entry 35's 9–18s/sentence numbers.<br>
+      Pipeline test: simulates real reading — synthesizes sentence N+1 in the
+      background while "reading" sentence N (estimated ms/word), then reports
+      the <em>perceived</em> wait, which is what a reader would actually feel.<br>
+      Streaming test: uses Kokoro's <code>tts.stream()</code> API instead of
+      <code>generate()</code> on a multi-sentence paragraph — tests whether
+      the first audio chunk arrives faster than a full <code>generate()</code>
+      call finishes, which would matter more than total synthesis time.<br>
+      Concurrent test: same pipeline test, but with MediaPipe's face landmarker
+      running live via your webcam the whole time (fps shown below). The
+      delegate dropdown lets you test GPU (what <code>main.js</code> currently
+      uses) vs CPU — this checks whether WebGPU-Kokoro and GPU-MediaPipe are
+      contending for the same hardware.
+    </p>
+  </div>
+
+  <div id="status"></div>
+  <div id="fpsReadout">MediaPipe FPS: <span id="fpsValue">–</span></div>
+  <pre id="log"></pre>
+
+  <video id="webcam" autoplay playsinline muted></video>
+  <canvas id="overlay" style="display:none;"></canvas>
+
+<script type="module">
+import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const fpsValueEl = document.getElementById('fpsValue');
+
+function log(msg) {
+  const t = new Date().toLocaleTimeString();
+  logEl.textContent += `[${t}] ${msg}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function setStatus(msg) { statusEl.textContent = msg; }
+
+// --- Worker + request/response plumbing -------------------------------
+let worker = null;
+let pendingLoad = null; // {resolve, reject}
+const pendingSynth = new Map(); // id -> {resolve, reject}
+const pendingStream = new Map(); // id -> {onChunk, resolve, reject}
+let synthCounter = 0;
+let lastResult = null; // for the "play last sentence" button
+
+function createWorker() {
+  worker = new Worker('kokoro-worker.js', { type: 'module' });
+  worker.onmessage = (event) => {
+    const msg = event.data;
+    if (msg.type === 'loaded') {
+      pendingLoad?.resolve(msg);
+      pendingLoad = null;
+    } else if (msg.type === 'error' && msg.phase === 'load') {
+      pendingLoad?.reject(new Error(msg.message));
+      pendingLoad = null;
+    } else if (msg.type === 'result') {
+      const p = pendingSynth.get(msg.id);
+      if (p) { p.resolve(msg); pendingSynth.delete(msg.id); }
+    } else if (msg.type === 'error' && msg.phase === 'synthesize') {
+      const p = pendingSynth.get(msg.id);
+      if (p) { p.reject(new Error(msg.message)); pendingSynth.delete(msg.id); }
+    } else if (msg.type === 'streamChunk') {
+      const p = pendingStream.get(msg.id);
+      if (p) p.onChunk(msg);
+    } else if (msg.type === 'streamDone') {
+      const p = pendingStream.get(msg.id);
+      if (p) { p.resolve(msg); pendingStream.delete(msg.id); }
+    } else if (msg.type === 'error' && msg.phase === 'synthesizeStream') {
+      const p = pendingStream.get(msg.id);
+      if (p) { p.reject(new Error(msg.message)); pendingStream.delete(msg.id); }
+    }
+  };
+  worker.onerror = (e) => {
+    log(`WORKER ERROR: ${e.message}`);
+  };
+}
+createWorker();
+
+function loadModel(device, dtype) {
+  return new Promise((resolve, reject) => {
+    pendingLoad = { resolve, reject };
+    worker.postMessage({ type: 'load', device, dtype });
+  });
+}
+
+function synthesize(text, voice) {
+  const id = ++synthCounter;
+  return new Promise((resolve, reject) => {
+    pendingSynth.set(id, { resolve, reject });
+    worker.postMessage({ type: 'synthesize', id, text, voice });
+  });
+}
+
+// Deeper pre-buffering means the pipeline test is allowed to *request*
+// several sentences ahead of what's being "read" right now. But the worker
+// only owns one Kokoro instance — if we fired those requests at the worker
+// back-to-back without waiting, onmessage's async handler could end up
+// running two tts.generate() calls concurrently against the same model
+// (worker onmessage isn't guaranteed to fully finish one message before the
+// next is dispatched, since it awaits). That's not the real constraint we're
+// trying to test (a second worker/model instance would be a much bigger,
+// separate architecture question), so actual dispatch to the worker is
+// serialized here via a promise chain, even though the *queueing* logic
+// above it can run several sentences ahead.
+let dispatchChain = Promise.resolve();
+function synthesizeQueued(text, voice) {
+  const result = dispatchChain.then(() => synthesize(text, voice));
+  // Chain continues regardless of this call's outcome, so one failed
+  // synthesis doesn't wedge every request queued behind it.
+  dispatchChain = result.then(() => {}, () => {});
+  return result;
+}
+
+function synthesizeStream(text, voice, onChunk) {
+  const id = ++synthCounter;
+  return new Promise((resolve, reject) => {
+    pendingStream.set(id, { onChunk, resolve, reject });
+    worker.postMessage({ type: 'synthesizeStream', id, text, voice });
+  });
+}
+
+// --- UI wiring: model load ---------------------------------------------
+const deviceSelect = document.getElementById('deviceSelect');
+const dtypeSelect = document.getElementById('dtypeSelect');
+const loadModelBtn = document.getElementById('loadModelBtn');
+const resetWorkerBtn = document.getElementById('resetWorkerBtn');
+const latencyTestBtn = document.getElementById('latencyTestBtn');
+const pipelineTestBtn = document.getElementById('pipelineTestBtn');
+const streamTestBtn = document.getElementById('streamTestBtn');
+const concurrentTestBtn = document.getElementById('concurrentTestBtn');
+const playLastBtn = document.getElementById('playLastBtn');
+const delegateSelect = document.getElementById('delegateSelect');
+const bufferDepthSelect = document.getElementById('bufferDepthSelect');
+
+deviceSelect.addEventListener('change', () => {
+  dtypeSelect.value = deviceSelect.value === 'webgpu' ? 'fp32' : 'q8';
+});
+
+let modelLoaded = false;
+let loadedDevice = null;
+let loadedDtype = null;
+
+loadModelBtn.addEventListener('click', async () => {
+  const device = deviceSelect.value;
+  const dtype = dtypeSelect.value;
+  loadModelBtn.disabled = true;
+  setStatus(`Loading model (device=${device}, dtype=${dtype})... this downloads weights the first time, can take a while.`);
+  log(`Loading model: device=${device} dtype=${dtype}`);
+  try {
+    const { loadMs } = await loadModel(device, dtype);
+    modelLoaded = true;
+    loadedDevice = device;
+    loadedDtype = dtype;
+    log(`Model loaded in ${loadMs.toFixed(0)}ms (device=${device}, dtype=${dtype})`);
+    setStatus(`Model ready (device=${device}, dtype=${dtype}).`);
+    latencyTestBtn.disabled = false;
+    pipelineTestBtn.disabled = false;
+    streamTestBtn.disabled = false;
+    concurrentTestBtn.disabled = false;
+  } catch (err) {
+    log(`LOAD FAILED: ${err.message}`);
+    setStatus(`Load failed — see log. (${err.message})`);
+  } finally {
+    loadModelBtn.disabled = false;
+  }
+});
+
+resetWorkerBtn.addEventListener('click', () => {
+  worker.terminate();
+  createWorker();
+  modelLoaded = false;
+  loadedDevice = null;
+  loadedDtype = null;
+  latencyTestBtn.disabled = true;
+  pipelineTestBtn.disabled = true;
+  streamTestBtn.disabled = true;
+  concurrentTestBtn.disabled = true;
+  playLastBtn.disabled = true;
+  setStatus('Worker reset — load a model again.');
+  log('Worker terminated and recreated.');
+});
+
+// --- Test sentences ------------------------------------------------------
+// Ordinary mixed-length sentences, nothing special about content — this is
+// purely a latency/pipelining test, not a syllable-estimation test (that's
+// Phase 12a's job).
+const TEST_SENTENCES = [
+  "The quick brown fox jumps over the lazy dog.",
+  "She whispered the recipe while reading quietly in bed.",
+  "Please turn to the next page and continue reading slowly.",
+  "A gentle breeze moved through the open window as the story continued.",
+  "He counted softly to himself before starting the next paragraph.",
+  "The old lighthouse stood alone against the darkening evening sky.",
+  "A cup of tea had gone cold on the nightstand.",
+  "Somewhere down the hall a clock kept its own slow time.",
+  "The dog stretched, sighed, and settled back down by the door.",
+  "Each page seemed to hold its own small, quiet weight.",
+  "She turned off the lamp but kept reading anyway.",
+  "The story wasn't in any hurry, and neither was she."
+];
+// 12 sentences, mixed short/long — long enough (at depth up to 3) to show
+// whether the queue catches up and stays caught up, or keeps sliding
+// further behind as the run goes on, which 6 sentences was too short to
+// reliably distinguish.
+
+// Mirrors main.js's estimateSyllables closely enough for pacing purposes —
+// vowel-group counting plus the silent-trailing-e correction. Doesn't need
+// to be byte-identical (this harness isn't testing Phase 12a's number/accent
+// handling), just close enough that per-word duration estimates are
+// realistic for ordinary English sentences like TEST_SENTENCES.
+function estimateSyllablesSimple(word) {
+  const cleaned = word.toLowerCase().replace(/[^a-z]/g, '');
+  if (!cleaned) return 1;
+  const matches = cleaned.match(/[aeiouy]+/g);
+  let syl = matches ? matches.length : 0;
+  if (cleaned.endsWith('e') && !cleaned.endsWith('le') && syl > 1) syl -= 1;
+  return Math.max(1, syl);
+}
+
+function estimateWordDurationMs(word, baseWordMs, perSyllableMs) {
+  return baseWordMs + estimateSyllablesSimple(word) * perSyllableMs;
+}
+
+// Sums real per-word estimates rather than a flat ms-per-word guess, so the
+// simulated read time reflects an actual reader profile (see the Reader
+// pace panel above) instead of one hardcoded assumption.
+function sentenceReadMs(sentence, baseWordMs, perSyllableMs) {
+  return sentence.trim().split(/\s+/)
+    .reduce((sum, w) => sum + estimateWordDurationMs(w, baseWordMs, perSyllableMs), 0);
+}
+
+function wordCount(sentence) {
+  return sentence.trim().split(/\s+/).length;
+}
+
+// --- Reader pace panel wiring --------------------------------------------
+const pacePresetSelect = document.getElementById('pacePresetSelect');
+const baseWordMsInput = document.getElementById('baseWordMsInput');
+const perSyllableMsInput = document.getElementById('perSyllableMsInput');
+const paceSummaryEl = document.getElementById('paceSummary');
+
+const PACE_PRESETS = {
+  yours:    { base: 571,   perSyll: 56.6 },
+  default:  { base: 120,   perSyll: 220  },
+  fast:     { base: 285.5, perSyll: 110  }, // half of yours / half of default — a guess, not a measurement
+  veryfast: { base: 142.8, perSyll: 55   }, // quarter of yours / quarter of default — a guess, not a measurement
+};
+
+function applyPacePreset() {
+  const key = pacePresetSelect.value;
+  if (key === 'custom') return; // leave whatever's typed in place
+  const preset = PACE_PRESETS[key];
+  baseWordMsInput.value = preset.base;
+  perSyllableMsInput.value = preset.perSyll;
+  updatePaceSummary();
+}
+
+function updatePaceSummary() {
+  const base = parseFloat(baseWordMsInput.value) || 0;
+  const perSyll = parseFloat(perSyllableMsInput.value) || 0;
+  const totalWords = TEST_SENTENCES.reduce((s, sent) => s + wordCount(sent), 0);
+  const totalMs = TEST_SENTENCES.reduce((s, sent) => s + sentenceReadMs(sent, base, perSyll), 0);
+  const avgPerWord = totalMs / totalWords;
+  const avgPerSentence = totalMs / TEST_SENTENCES.length;
+  paceSummaryEl.textContent = `At these values: ~${avgPerWord.toFixed(0)}ms/word avg, `
+    + `~${avgPerSentence.toFixed(0)}ms/sentence avg across the ${TEST_SENTENCES.length} test sentences. `
+    + `Note: "fast"/"very fast" presets are guesses for sweeping the range, not measured data — `
+    + `only "yours" and "default" come from real numbers (your calibration / main.js's DEFAULT_* constants).`;
+}
+
+pacePresetSelect.addEventListener('change', applyPacePreset);
+baseWordMsInput.addEventListener('input', () => {
+  pacePresetSelect.value = 'custom';
+  updatePaceSummary();
+});
+perSyllableMsInput.addEventListener('input', () => {
+  pacePresetSelect.value = 'custom';
+  updatePaceSummary();
+});
+
+function configLabel() {
+  return `[Kokoro: device=${loadedDevice || '?'} dtype=${loadedDtype || '?'}]`;
+}
+
+// --- Test 1: raw sequential latency ------------------------------------
+latencyTestBtn.addEventListener('click', async () => {
+  latencyTestBtn.disabled = true;
+  log(`--- Raw latency test ${configLabel()} (sequential, no overlap) ---`);
+  const times = [];
+  for (const sentence of TEST_SENTENCES) {
+    const t0 = performance.now();
+    const result = await synthesize(sentence, 'af_sky');
+    const wallMs = performance.now() - t0;
+    lastResult = result;
+    playLastBtn.disabled = false;
+    times.push(result.synthMs);
+    log(`  "${sentence.slice(0, 40)}..." synthMs=${result.synthMs.toFixed(0)} (wall=${wallMs.toFixed(0)})`);
+  }
+  const avg = times.reduce((a, b) => a + b, 0) / times.length;
+  log(`Raw latency summary: avg=${avg.toFixed(0)}ms min=${Math.min(...times).toFixed(0)}ms max=${Math.max(...times).toFixed(0)}ms`);
+  log(`(Entry 35 WASM baseline for comparison: q8 ~17s avg, q4 ~10s avg)`);
+  latencyTestBtn.disabled = false;
+});
+
+// --- Test 2: pre-buffer pipeline simulation ------------------------------
+// Read time per sentence now comes from the Reader pace panel (real
+// baseWordMs/msPerSyllable formula, mirroring main.js), not a flat
+// ms-per-word guess — see estimateWordDurationMs/sentenceReadMs above.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// depth=1 reproduces Entry 36's exact behavior (only ever one sentence
+// queued ahead). depth>1 lets the queue run further ahead of the reader,
+// which can only help if the worker is *capable* of keeping up on average —
+// it can't parallelize synthesis (single Kokoro instance, see
+// synthesizeQueued above), so a sustained per-sentence throughput deficit
+// will still show up as growing wait, just delayed a few sentences by
+// however much head start `depth` bought at the start.
+async function runPipelineTest(logPrefix, depth = 1) {
+  const paceBaseMs = parseFloat(baseWordMsInput.value) || 0;
+  const paceSyllMs = parseFloat(perSyllableMsInput.value) || 0;
+  const waits = [];
+  const synthTimes = [];
+  const readTimes = [];
+  const queue = []; // [{ index, promise }], oldest-needed-first
+  let nextIndexToFetch = 0;
+
+  function fillQueue() {
+    while (queue.length < depth && nextIndexToFetch < TEST_SENTENCES.length) {
+      const idx = nextIndexToFetch++;
+      queue.push({ index: idx, promise: synthesizeQueued(TEST_SENTENCES[idx], 'af_sky') });
+    }
+  }
+  fillQueue(); // prime up to `depth` — sentence 0 still gets no head start either way
+
+  for (let i = 0; i < TEST_SENTENCES.length; i++) {
+    const entry = queue.shift();
+    const t0 = performance.now();
+    const result = await entry.promise;
+    const perceivedWaitMs = performance.now() - t0;
+    lastResult = result;
+    playLastBtn.disabled = false;
+    waits.push(perceivedWaitMs);
+    synthTimes.push(result.synthMs);
+
+    fillQueue(); // top back up to depth now that a slot is free — dispatch is
+                 // still serialized (see synthesizeQueued), this just lets the
+                 // *request* for sentence i+depth go out this early instead of
+                 // waiting for the reader to reach i+depth-1 first.
+
+    log(`${logPrefix}sentence ${i}: synth=${result.synthMs.toFixed(0)}ms, perceived wait=${perceivedWaitMs.toFixed(0)}ms, queued ahead=${queue.length}`);
+
+    const readMs = sentenceReadMs(TEST_SENTENCES[i], paceBaseMs, paceSyllMs);
+    readTimes.push(readMs);
+    await sleep(readMs); // simulate the reader mouthing through the current sentence
+  }
+
+  const avgWait = waits.reduce((a, b) => a + b, 0) / waits.length;
+  const afterCount = Math.max(waits.length - depth, 1);
+  const avgWaitAfterWarmup = waits.slice(depth).reduce((a, b) => a + b, 0) / afterCount;
+  const avgSynth = synthTimes.reduce((a, b) => a + b, 0) / synthTimes.length;
+  const avgRead = readTimes.reduce((a, b) => a + b, 0) / readTimes.length;
+
+  // Is the queue net catching up or net falling behind, comparing the first
+  // half of the run to the second half? A shrinking wait = buffering is
+  // absorbing the gap. A flat or growing wait past the warmup sentences =
+  // a real throughput ceiling that no queue depth will fix.
+  const mid = Math.floor(waits.length / 2);
+  const firstHalfAvg = waits.slice(0, mid).reduce((a, b) => a + b, 0) / (mid || 1);
+  const secondHalfAvg = waits.slice(mid).reduce((a, b) => a + b, 0) / (waits.length - mid);
+  const trend = secondHalfAvg < firstHalfAvg * 0.7
+    ? 'shrinking — buffering is catching up'
+    : secondHalfAvg > firstHalfAvg * 1.3
+      ? 'growing — falling further behind as the run goes on'
+      : 'flat — neither catching up nor falling further behind';
+
+  log(`${logPrefix}Pipeline summary (depth=${depth}, pace: base=${paceBaseMs}ms + ${paceSyllMs}ms/syll): avg wait=${avgWait.toFixed(0)}ms, avg wait after ${depth}-sentence warmup=${avgWaitAfterWarmup.toFixed(0)}ms`);
+  log(`${logPrefix}  avg synth=${avgSynth.toFixed(0)}ms/sentence vs avg simulated read=${avgRead.toFixed(0)}ms/sentence`);
+  log(`${logPrefix}  wait trend: first-half avg=${firstHalfAvg.toFixed(0)}ms, second-half avg=${secondHalfAvg.toFixed(0)}ms — ${trend}`);
+  if (avgSynth > avgRead) {
+    log(`${logPrefix}  ⚠ synth (${avgSynth.toFixed(0)}ms) > read (${avgRead.toFixed(0)}ms) on average — this is a throughput ceiling. No buffer depth reaches sustained 0ms wait under this condition; deeper buffering only delays when the growing gap becomes visible.`);
+  } else {
+    log(`${logPrefix}  synth (${avgSynth.toFixed(0)}ms) ≤ read (${avgRead.toFixed(0)}ms) on average — steady-state 0ms wait is structurally possible here; remaining wait is warmup/variance that deeper buffering can plausibly absorb.`);
+  }
+
+  return { waits, avgWait, avgWaitAfterWarmup, avgSynth, avgRead, trend };
+}
+
+pipelineTestBtn.addEventListener('click', async () => {
+  pipelineTestBtn.disabled = true;
+  const depth = parseInt(bufferDepthSelect.value, 10);
+  log(`--- Pre-buffer pipeline test ${configLabel()} depth=${depth} pace=${pacePresetSelect.value} (no concurrent MediaPipe) ---`);
+  await runPipelineTest('  ', depth);
+  pipelineTestBtn.disabled = false;
+});
+
+// --- Test: streaming API vs generate() -----------------------------------
+// Joins all test sentences into one paragraph and streams it, to see
+// whether the first chunk arrives faster than a single generate() call on
+// one sentence (the comparison that actually matters — see notes in the UI).
+const STREAM_TEST_TEXT = TEST_SENTENCES.join(' ');
+
+streamTestBtn.addEventListener('click', async () => {
+  streamTestBtn.disabled = true;
+  log(`--- Streaming test ${configLabel()} (tts.stream() on the full paragraph) ---`);
+  const chunkArrivals = [];
+  try {
+    const result = await synthesizeStream(STREAM_TEST_TEXT, 'af_sky', (chunkMsg) => {
+      chunkArrivals.push(chunkMsg.arrivedMs);
+      lastResult = { samples: chunkMsg.samples, sampleRate: chunkMsg.sampleRate };
+      playLastBtn.disabled = false;
+      log(`  chunk ${chunkMsg.chunkIndex} arrived at ${chunkMsg.arrivedMs.toFixed(0)}ms: "${chunkMsg.chunkText.slice(0, 40)}..."`);
+    });
+    log(`Streaming summary: ${result.chunkCount} chunk(s), first chunk at ${chunkArrivals[0]?.toFixed(0)}ms, total ${result.totalMs.toFixed(0)}ms`);
+    log(`(Compare "first chunk" above to this device's raw latency test avg for a single sentence, above.)`);
+  } catch (err) {
+    log(`STREAM TEST ERROR: ${err.message}`);
+  }
+  streamTestBtn.disabled = false;
+});
+
+// --- Concurrent test: pipeline + live MediaPipe -------------------------
+const video = document.getElementById('webcam');
+const canvas = document.getElementById('overlay');
+let faceLandmarker = null;
+let faceLandmarkerDelegate = null; // tracks which delegate the current instance was built with
+let fpsRunning = false;
+let frameTimes = [];
+let fpsSamples = []; // per-frame instantaneous fps, collected whenever fpsRunning — read/cleared by whichever test is active
+
+async function ensureFaceLandmarker(delegate) {
+  if (faceLandmarker && faceLandmarkerDelegate === delegate) return;
+  if (faceLandmarker) {
+    faceLandmarker.close(); // delegate changed — rebuild rather than reuse
+    faceLandmarker = null;
+  }
+  setStatus(`Loading MediaPipe face landmarker (delegate=${delegate})...`);
+  const filesetResolver = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+  );
+  faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+    baseOptions: {
+      modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      delegate
+    },
+    runningMode: "VIDEO",
+    numFaces: 1
+  });
+  faceLandmarkerDelegate = delegate;
+}
+
+async function startWebcamLoop() {
+  const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+  video.srcObject = stream;
+  await new Promise((r) => video.addEventListener('loadeddata', r, { once: true }));
+  fpsRunning = true;
+  frameTimes = [];
+  requestAnimationFrame(predictLoop);
+  return stream;
+}
+
+function stopWebcamLoop(stream) {
+  fpsRunning = false;
+  stream.getTracks().forEach((t) => t.stop());
+  fpsValueEl.textContent = '–';
+}
+
+function predictLoop() {
+  if (!fpsRunning) return;
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  faceLandmarker.detectForVideo(video, performance.now());
+
+  const now = performance.now();
+  frameTimes.push(now);
+  frameTimes = frameTimes.filter((t) => now - t <= 1000);
+  fpsValueEl.textContent = frameTimes.length.toString();
+  fpsSamples.push(frameTimes.length);
+
+  requestAnimationFrame(predictLoop);
+}
+
+concurrentTestBtn.addEventListener('click', async () => {
+  concurrentTestBtn.disabled = true;
+  const delegate = delegateSelect.value;
+  const depth = parseInt(bufferDepthSelect.value, 10);
+  log(`--- Pipeline + concurrent MediaPipe test ${configLabel()} depth=${depth} pace=${pacePresetSelect.value} (MediaPipe delegate=${delegate}) ---`);
+  try {
+    await ensureFaceLandmarker(delegate);
+    setStatus('Starting webcam...');
+    const stream = await startWebcamLoop();
+    setStatus('MediaPipe running — starting pipeline test now.');
+    log(`  MediaPipe live (delegate=${delegate}), watch the FPS readout above during the run.`);
+    fpsSamples = [];
+    await runPipelineTest('  [concurrent] ', depth);
+    stopWebcamLoop(stream);
+    logFpsStats(`  [concurrent, delegate=${delegate}] `);
+    setStatus('Concurrent test done.');
+  } catch (err) {
+    log(`CONCURRENT TEST ERROR: ${err.message}`);
+    setStatus(`Error: ${err.message}`);
+  } finally {
+    concurrentTestBtn.disabled = false;
+  }
+});
+
+function logFpsStats(prefix) {
+  if (fpsSamples.length === 0) { log(`${prefix}no FPS samples collected.`); return; }
+  const avg = fpsSamples.reduce((a, b) => a + b, 0) / fpsSamples.length;
+  const min = Math.min(...fpsSamples);
+  const max = Math.max(...fpsSamples);
+  log(`${prefix}FPS avg=${avg.toFixed(1)} min=${min} max=${max} (n=${fpsSamples.length} samples)`);
+}
+
+const baselineFpsBtn = document.getElementById('baselineFpsBtn');
+baselineFpsBtn.addEventListener('click', async () => {
+  baselineFpsBtn.disabled = true;
+  const delegate = delegateSelect.value;
+  log(`--- MediaPipe-only baseline (delegate=${delegate}, no TTS running) ---`);
+  try {
+    await ensureFaceLandmarker(delegate);
+    setStatus('Starting webcam for baseline...');
+    const stream = await startWebcamLoop();
+    fpsSamples = [];
+    await sleep(8000);
+    stopWebcamLoop(stream);
+    logFpsStats(`  [baseline, delegate=${delegate}] `);
+    log(`(Entry 35's own GPU-delegate idle baseline for comparison: ~57-59fps)`);
+    setStatus('Baseline test done.');
+  } catch (err) {
+    log(`BASELINE TEST ERROR: ${err.message}`);
+    setStatus(`Error: ${err.message}`);
+  } finally {
+    baselineFpsBtn.disabled = false;
+  }
+});
+
+// --- Playback for quality-checking (e.g. the known WebGPU/Android
+// corrupted-audio issue reported upstream — worth listening for glitches
+// on any device/backend combo, not just that one) ------------------------
+playLastBtn.addEventListener('click', async () => {
+  if (!lastResult) return;
+  const { samples, sampleRate } = lastResult;
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const buffer = audioCtx.createBuffer(1, samples.length, sampleRate);
+  buffer.copyToChannel(samples, 0);
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioCtx.destination);
+  source.start();
+  log('Playing last synthesized sentence — listen for any glitches/corruption.');
+});
+
+updatePaceSummary();
+log('Ready. Pick a device/dtype and click "Load model" to begin.');
+</script>
+</body>
+</html>

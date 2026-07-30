@@ -279,6 +279,12 @@
       <input type="checkbox" id="toneToggle">
       Emotional tone (experimental)
     </label>
+    <label style="display: flex; align-items: center; gap: 6px;">
+      Voice
+      <select id="voiceSelect" style="max-width: 220px;">
+        <option value="">Browser default</option>
+      </select>
+    </label>
   </div>
 
   <div id="calibrationPanel" class="panel" style="display:none; margin-top: 10px; max-width: 640px;">
@@ -328,12 +334,19 @@
       <div>Calibration: <span id="calibrationStatusValue">using default thresholds</span></div>
       <div>Speed calibration: <span id="speedCalibrationValue">using default pacing (calibrate to personalize)</span></div>
       <div>Tone: <span id="toneValue">off</span></div>
+      <div>Voice: <span id="voiceValue">browser default</span></div>
       <div>Trouble score: <span id="troubleValue">0.00</span></div>
       <div>Word boundary events (this utterance): <span id="boundaryCountValue">0</span></div>
       <div>Last onboundary: <span id="lastBoundaryAgoValue">-</span>ms ago</div>
       <div>Speed fit (raw): <span id="rateFitDebugValue">-</span></div>
       <div>Detection gap (last close): <span id="detectionGapValue">-</span></div>
       <div>Cancel-to-actual-stop gap (last close): <span id="cancelStopGapValue">-</span></div>
+      <div>Last word / gap since prev boundary: <span id="lastWordTextValue">-</span> / <span id="lastWordGapValue">-</span> (prev word expected <span id="lastWordExpectedValue">-</span>)</div>
+      <div>Duplicate boundary events (this utterance): <span id="duplicateBoundaryValue">0</span></div>
+      <div>Early-close detections (this utterance): <span id="earlyCloseValue">0</span></div>
+      <div>Last close: in risky window: <span id="lastCloseInRiskyWindowValue">-</span> (nearest risky delta: <span id="lastCloseRiskyDeltaValue">-</span>)</div>
+      <div>speak() calls this browser session (not per-utterance): <span id="sessionSpeakCountValue">0</span></div>
+      <div>TTS iframe recycles this session (Phase 9a-iframe experiment): <span id="ttsRecycleCountValue">0</span></div>
     </div>
   </details>
 
