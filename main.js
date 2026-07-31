@@ -84,6 +84,23 @@ window.addEventListener('keydown', (e) => {
   if (SCROLL_KEYS.has(e.key)) onManualScrollGesture();
 });
 
+// --- Manual ON/OFF speech switch (Entry 45+) ---
+// Spacebar toggles the switch, EXCEPT while focus is inside the text input —
+// otherwise a reader typing/pasting their reading text couldn't type a
+// space. Also gated on readingActive: outside an active session the switch
+// does nothing, so space is left to do its normal browser thing (page
+// scroll) rather than silently eating the keypress for no effect.
+function isTypingContext() {
+  const el = document.activeElement;
+  if (!el) return false;
+  return el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.isContentEditable;
+}
+window.addEventListener('keydown', (e) => {
+  if (e.key !== ' ' || isTypingContext() || !readingActive) return;
+  e.preventDefault(); // don't also scroll the page
+  toggleManualSpeechSwitch();
+});
+
 let faceLandmarker;
 
 // --- Phase 2: mouth-open/closed detection + speech wiring ---
@@ -380,22 +397,12 @@ function estimateWordDuration(word) {
 
 // --- Phase 11: sample sentence for the Speed calibration step ---
 // Deliberately spans a range of syllable counts (per this file's own
-// estimateSyllables — internal consistency matters more than strict
-// linguistic accuracy, since the regression below only needs to relate
-// THIS app's syllable estimate to THIS user's mouthing duration) so the
-// regression in finishCalibration has enough spread to separate a personal
-// "per-syllable" rate from a personal "fixed per-word overhead," rather
-// than collapsing to one blended average like a single-number timing would.
+// estimateSyllables — used elsewhere for real reading text; this sentence
+// itself is reused as the Entry 46 test-voice preview phrase for the manual
+// Speed step (see testRateVoice), and previously fed the now-removed
+// regression's word-timing samples.
 const SAMPLE_SENTENCE = "The cat slowly wandered through an unexpectedly enormous garden " +
   "while butterflies fluttered quietly overhead.";
-const SAMPLE_WORDS = SAMPLE_SENTENCE.match(/\S+/g).map(text => ({
-  text,
-  syllables: estimateSyllables(text)
-}));
-// Phase 11 (revised): the Speed step now asks for SAMPLE_WORDS TWICE through
-// — see the CALIBRATION_STEPS 'rate' entry for the full reasoning. Word
-// index in the tracker wraps via `% SAMPLE_WORDS.length` against this.
-const RATE_PASSES = 2;
 
 // Phase 12d fix: getWordForCadence() (used only to prime the now-removed
 // mouthOpenStartTime/currentWordExpectedMs clock on a closed->open
@@ -987,123 +994,74 @@ const CALIBRATION_STORAGE_KEY = 'readingAppCalibration';
 // removed Entry 45 along with the rest of pose gating.)
 const MIN_MAR_GAP = 0.015;
 
-// Phase 11: validation for the Speed step's regression. A duration-per-word
-// regression needs both (a) enough data points and (b) enough syllable-count
-// *variety* among them — e.g. 6 captured words that are all 1-syllable can't
-// separate BASE_WORD_MS from MS_PER_SYLLABLE (infinite equally-good fits),
-// same failure shape as trying to fit a line through points with no spread
-// on the x-axis. Both are checked in finishCalibration before trusting the
-// fit, same "reject rather than silently save broken values" pattern as
-// MIN_MAR_GAP above.
-const MIN_RATE_WORDS_CAPTURED = 6;
-const MIN_RATE_SYLLABLE_SPREAD = 2; // max syllables captured - min syllables captured, must exceed this
-
-// Phase 11 rebuild: the original Speed-step tracker required MAR to cross a
-// full CLOSE_THRESHOLD between every word, same as the main reading loop's
-// mouth-close detection. Live testing showed this breaks down badly during
-// natural continuous mouthing — connected speech often doesn't dip all the
-// way to "closed" between words, and the effect got *worse* the faster the
-// user mouthed (confirmed live: a fast run produced a NEGATIVE
-// msPerSyllable slope, i.e. multiple real words silently merging into one
-// tracked interval). Replaced with peak-trough envelope detection: track
-// whether the (lightly smoothed) MAR signal is rising or falling, and
-// confirm a word boundary at each local minimum that dips by at least
-// RATE_PROMINENCE_FRACTION of the user's own neutral-to-mutter range below
-// the preceding peak — no absolute "closed" crossing required. This is the
-// same idea speech-processing envelope segmentation uses for syllable/word
-// boundaries in continuous speech.
-const RATE_SMOOTHING_ALPHA = 0.35; // EMA factor on raw MAR before peak-trough detection, filters landmark jitter without much lag (words run several hundred ms+)
-// Lowered from 0.25 (Phase 11 testing, this session): live diagnostic
-// logging showed "enormous" clearing the old threshold (0.0327) by only 3%
-// margin (0.0338), while words repeatedly needing manual repeats across
-// multiple test runs ("fluttered", "quietly", "butterflies") share a
-// pattern — they're articulated more with lips/tongue than jaw drop, so
-// even a clear, natural attempt produces a smaller true MAR swing than an
-// open-vowel word like "cat" or "an". A single fixed threshold can't serve
-// both equally; 0.15 was chosen to sit comfortably below the smallest
-// genuine swings observed (~0.033-0.09) while staying well above the
-// sensor noise floor (RATE_MIN_PROMINENCE).
-const RATE_PROMINENCE_FRACTION = 0.15;
-const RATE_MIN_PROMINENCE = 0.01; // floor, in case a user's own neutral-mutter gap is unusually small
-
-// Live testing (two full rounds) showed even a clean per-word tracker isn't
-// enough on its own: a single natural read-through of the sample sentence
-// reliably contains at least one hesitation/thinking-pause on some word,
-// and ordinary least-squares has no defense against that with only ~14
-// points — one outlier can flip the fitted slope negative. Rejected before
-// fitting using a standard modified z-score on PACE (duration/syllables,
-// not raw duration — a legitimately slow 5-syllable word shouldn't look
-// like an outlier next to a fast 1-syllable one). 3.0 is the conventional
-// default for this method (Iglewicz & Hoaglin).
-const RATE_OUTLIER_Z_THRESHOLD = 3.0;
-
-// Real problem found via testing (not a threshold issue): when a word's dip
-// doesn't register, the tracker just keeps waiting — it has no idea the
-// user noticed and repeated the word 2-3 times to force a detection. That
-// repeated time silently gets folded into ONE captured duration, and worse,
-// if a whole trough gets missed entirely, every capture after that point is
-// paired with the wrong word/syllable-count for the rest of the run —
-// corruption the outlier filter can't reliably catch, since a misaligned
-// entry can still look individually "normal." Rather than let a run finish
-// looking complete while secretly corrupted, a stall now fails the step
-// immediately (same "reject, don't silently save" pattern as every other
-// validation in this file) so the user retries cleanly instead of powering
-// through with repeats.
-const RATE_STALL_FACTOR = 5; // how many multiples of a word's generic estimated duration counts as "stuck"
-const RATE_STALL_MIN_MS = 2500; // floor, so a short 1-syllable word's tiny generic estimate can't make the stall trigger unreasonably fast
-
-// Found via testing (opposite problem from the stall above): loose, fast
-// mumbling can produce enough small rise/fall wobble WITHIN a single word
-// that each wobble individually clears prominenceThreshold — the tracker
-// raced ahead of real speech, consuming all 14 word slots on internal
-// jaw-bounce noise rather than genuine word-to-word gaps. Standard fix for
-// this class of problem in any peak-detection system: a refractory period
-// after each confirmed trough during which another can't be confirmed, so
-// the detector can't fire faster than physically plausible for distinct
-// spoken words. 200ms is an unvalidated starting guess (based on the
-// fastest genuine word duration seen in testing, ~250ms, minus margin) —
-// same "starting guess, live-tune from real data" tier as every other
-// threshold in this file.
-const MIN_INTER_TROUGH_MS = 200;
-
-// Tried and reverted (Phase 11): an adaptive version of prominenceThreshold
-// that re-derived itself from the rolling average of recently CONFIRMED
-// word swings, meant to track declining amplitude over a longer utterance.
-// Live testing showed a repeat needed on one word inflates that word's
-// recorded swing (it's the merged motion of multiple attempts), which then
-// raised the threshold for the NEXT word too — a feedback loop that made
-// failures compound instead of self-correcting. Reverted to the fixed
-// version below. See PROGRESS.md Section 3 for the fuller reasoning.
-// Sane bounds for the regression output — guards against a noisy fit (e.g.
-// from a distracted run) producing an unusable/unintelligible personalized
-// rate or pacing. Centered around the DEFAULT_* constants above.
+// Entry 46: Speed step rebuilt from the ground up — the Phase 11 regression
+// above (multi-pass mutter sampling, peak-trough word-boundary detection,
+// outlier rejection, OLS fit) is REMOVED. Reasoning (PROGRESS.md Section 3):
+// it was inferring a number from noisy live mouth-timing data, which a
+// live-picked value has none of. Replaced with a manual slider
+// (0.5x-1.75x) + audible test-voice preview, tuned continuously (not
+// discrete steps) via three hand-tuned anchor points and linear
+// interpolation between them for whatever rate the user actually lands on.
+// The slider value IS PERSONALIZED_RATE directly — no separate fit needed
+// for that half. Only msPerSyllable/baseWordMs (used for cadence-gating
+// tightness, not TTS playback) need interpolating.
 //
-// MIN_MS_PER_SYLLABLE/MAX_BASE_WORD_MS updated (mobile testing session,
-// post-Entry-22): the original bounds (80 / 300) were guessed against the
-// assumption that per-syllable cost dominates a word's duration. A real
-// calibration run (console log, 28/28 words captured, clean two-pass fit)
-// showed the opposite shape for this user: raw fit msPerSyllable=3.4,
-// baseWordMs=642.7 — a large fixed per-word cost (mouth open/close
-// overhead) with almost no additional cost per syllable. The old bounds
-// didn't just trim that fit, they inverted it: msPerSyllable got floored
-// UP from 3.4 to 80 (24x), baseWordMs got capped DOWN from 642.7 to 300
-// (more than half), and the resulting personalizedRate came out as 1.272
-// (audibly fast) where the unclamped raw fit gives ~0.93 (slightly slow —
-// the sane answer for someone with heavy per-word overhead). Widened so a
-// real fit like this one passes through un-mangled. MIN_MS_PER_SYLLABLE
-// floors at 0 rather than removing the floor entirely — a NEGATIVE slope
-// (longer words taking less time) is still implausible and worth guarding
-// against; near-zero is not. MAX_BASE_WORD_MS raised to 800, giving
-// headroom above the one real data point seen so far while still guarding
-// against a genuinely runaway noisy fit. Revisit if real fits start
-// clustering near these new bounds the same way they did at the old ones —
-// same "the bound is wrong, not the fit" signal as before.
-const MIN_PERSONALIZED_RATE = 0.5;
-const MAX_PERSONALIZED_RATE = 2.0;
-const MIN_MS_PER_SYLLABLE = 0;
-const MAX_MS_PER_SYLLABLE = 500;
-const MIN_BASE_WORD_MS = 0;
-const MAX_BASE_WORD_MS = 800;
+// Anchor values below are Entry-47 DATA-TUNED (final), using noise-filtered
+// data from a temporary logging tool used for this tuning pass (since
+// removed once tuning closed out — see PROGRESS.md Entry 47/48 for the
+// full test history). First pass over-corrected: it was contaminated
+// by forced/rushed taps on words that were physically hard to mouth
+// cleanly at the slider extremes, which skewed the average down and led to
+// anchors that were cut too aggressively (180/105 slow, 120/55 fast).
+// Filtering closes under 150ms and re-testing with genuinely natural
+// pacing showed the opposite problem — clean avg elapsed/expected ratio
+// was 1.28 at 0.5x and 1.13 at 1.75x (n=25/26), meaning those first-pass
+// anchors were now too SHORT. Values below scale the first-pass anchors up
+// by those clean ratios, landing close to (but not identical to) the
+// original starting guesses — net conclusion: the original guesses were
+// closer to right than assumed; genuine cadence gating noise mostly came
+// from strained mimicry at the extremes, not from the anchor numbers
+// themselves being far off.
+// Known residual gap NOT addressed here: estimateWordDuration() has no
+// per-word sense of sentence-final punctuation or emphasis, so short
+// function words still get over-estimated and sentence-ending words still
+// get under-estimated relative to each other — a formula-level limitation,
+// out of scope for anchor tuning. The 1.0 anchor still reuses the existing
+// DEFAULT_* pair (untested by this pass — extremes only) so a user who
+// leaves the slider untouched still sees no behavior change.
+const RATE_SLIDER_MIN = 0.5;
+const RATE_SLIDER_MAX = 1.75;
+const RATE_SLOW_MS_PER_SYLLABLE = 230;
+const RATE_SLOW_BASE_WORD_MS = 135;
+const RATE_FAST_MS_PER_SYLLABLE = 135;
+const RATE_FAST_BASE_WORD_MS = 62;
+
+const RATE_ANCHORS = [
+  { rate: RATE_SLIDER_MIN, msPerSyllable: RATE_SLOW_MS_PER_SYLLABLE, baseWordMs: RATE_SLOW_BASE_WORD_MS },
+  { rate: 1.0, msPerSyllable: DEFAULT_MS_PER_SYLLABLE, baseWordMs: DEFAULT_BASE_WORD_MS },
+  { rate: RATE_SLIDER_MAX, msPerSyllable: RATE_FAST_MS_PER_SYLLABLE, baseWordMs: RATE_FAST_BASE_WORD_MS },
+];
+
+// Piecewise-linear interpolation across RATE_ANCHORS. Verified against an
+// isolated harness before wiring in (clamping + mid-point math) — see
+// Entry 46. Clamps to the slider's own range first, so a value can't sneak
+// in from outside RATE_SLIDER_MIN/MAX and hit the "no segment matched"
+// fallthrough below.
+function interpolateCadence(rate) {
+  const clamped = Math.min(RATE_SLIDER_MAX, Math.max(RATE_SLIDER_MIN, rate));
+  for (let i = 0; i < RATE_ANCHORS.length - 1; i++) {
+    const a = RATE_ANCHORS[i], b = RATE_ANCHORS[i + 1];
+    if (clamped >= a.rate && clamped <= b.rate) {
+      const t = (clamped - a.rate) / (b.rate - a.rate);
+      return {
+        msPerSyllable: a.msPerSyllable + t * (b.msPerSyllable - a.msPerSyllable),
+        baseWordMs: a.baseWordMs + t * (b.baseWordMs - a.baseWordMs),
+      };
+    }
+  }
+  // Unreachable given the clamp above; kept as a defensive fallback.
+  return { msPerSyllable: DEFAULT_MS_PER_SYLLABLE, baseWordMs: DEFAULT_BASE_WORD_MS };
+}
 
 // --- Phase 11b: ambient trouble-shading ---
 // Addresses the detection-legibility paradox (Entry 17): the reader can't
@@ -1149,8 +1107,7 @@ const TROUBLE_MAX_OPACITY = 0.85;
 const TROUBLE_MIN_SATURATION = 30; // %, floor so even faint trouble is a visible (not just alpha) shift
 const TROUBLE_MAX_SATURATION = 90; // %
 
-// Sharp-pulse trigger for a stuck word during LIVE reading. Deliberately
-// looser (fires sooner) than calibration's RATE_STALL_FACTOR (5x) — this is
+// Sharp-pulse trigger for a stuck word during LIVE reading. This is
 // a non-blocking heads-up nudge, not a hard failure that aborts anything, so
 // it's fine (and more useful) for it to fire earlier. Real reading also has
 // genuine long pauses (re-reading, thinking) that aren't errors, which is
@@ -1206,6 +1163,7 @@ function updateTroubleShading() {
   troubleValueEl.textContent = displayedTroubleScore.toFixed(2);
 
   checkReadingStallPulse();
+  updateWarningBox();
 }
 
 // Live-reading analog of calibration's stall detection (Phase 11), but
@@ -1240,6 +1198,12 @@ function resetTroubleShading() {
   readingPaneEl.classList.remove('trouble-pulse');
   readingPaneEl.style.borderColor = 'transparent';
   troubleValueEl.textContent = '0.00';
+  currentWarningReason = null;
+  warningBoxMinimized = false;
+  cadenceWarningActiveUntil = 0;
+  warningBoxEl.classList.add('warning-hidden');
+  updateWarningBoxMinimizedUI();
+  warningDebugValueEl.textContent = 'none';
 }
 
 // Phase 7b's 'facing'/'away' pose-calibration steps removed Entry 45
@@ -1264,25 +1228,15 @@ const CALIBRATION_STEPS = [
   },
   {
     id: 'rate',
-    // Phase 11 (revised): asks for the sentence TWICE now — a single 14-word
-    // pass produced a noisy regression even on fully clean captures (no
-    // detection failures, no outliers), because syllable count alone is a
-    // crude proxy for real timing (word familiarity, stress, coarticulation
-    // all matter too) — one pass just isn't enough data to fit two free
-    // parameters reliably. A second pass through the SAME sentence lets each
-    // word's noise average against an independent second measurement of
-    // that exact word, which is the right remedy for word-specific
-    // noise — a different sentence would add variety but not that.
-    // Instruction says "twice" up front in the static text rather than via
-    // a live prompt mid-run — deliberate, given prior testing showed live
-    // reactive feedback here changes how naturally people mouth the words.
+    // Entry 46: rebuilt from a timed mouthing sample into a manual slider —
+    // see PROGRESS.md Section 3 for the full reasoning. No prepMs/sampleMs;
+    // this step doesn't run through the per-frame prep/sampling pipeline at
+    // all (updateCalibration() returns immediately for metric === 'rate').
+    // Advancing happens via the "Set speed" button (finishRateStep below),
+    // not a countdown.
     label: 'Step 3 of 3 — Your pace',
-    instruction: 'At your own natural pace, silently mouth this sentence TWICE through, word by word, ' +
-      'pausing briefly between words like normal reading: "' + SAMPLE_SENTENCE + '"',
-    prepMs: 1500,
-    // Doubled from the single-pass ceiling — generous, not a target, same
-    // reasoning as before.
-    sampleMs: 38000,
+    instruction: 'Drag the slider to a speed that feels comfortable, and use "Test voice" to hear it. ' +
+      'You can fine-tune this later too.',
     metric: 'rate'
   }
 ];
@@ -1294,11 +1248,10 @@ let calibration = {
   phaseStartTime: 0,
   currentSamples: [],   // samples for the step currently being collected (mar/pose steps)
   results: {},           // stepId -> array of samples, filled in as steps complete
-  // Phase 11: live open/closed word-boundary tracker used only during the
-  // 'rate' step's sampling phase. Separate from the main reading session's
-  // mouthState/marBuffer (Section 3) since calibration isn't a reading
-  // session and shouldn't touch that state.
-  rateTracker: null,    // { smoothedMar, baselineValue, baselineTime, direction, extremeValue, extremeTime, previousTroughTime, wordIndex, durations, prominenceThreshold }
+  // Entry 46: replaces the old rateTracker — just the slider's current
+  // value, live-updated on 'input' while the rate step is showing, read
+  // once when the user confirms via finishRateStep().
+  selectedRate: DEFAULT_PERSONALIZED_RATE,
 };
 
 const calibrateBtn = document.getElementById('calibrateBtn');
@@ -1333,11 +1286,13 @@ function startCalibration() {
     phase: 'prep',
     phaseStartTime: performance.now(),
     currentSamples: [],
-    results: {}
+    results: {},
+    selectedRate: DEFAULT_PERSONALIZED_RATE
   };
 
   startBtn.disabled = true;
   calibrateBtn.disabled = true;
+  speechSwitchBtn.classList.add('is-inactive'); // predictLoop skips the per-frame sync during calibration, so set explicitly here
   calibrationRetryBtn.style.display = 'none';
   calibrationMessageEl.textContent = '';
   calibrationPanel.style.display = 'block';
@@ -1357,6 +1312,47 @@ function renderCalibrationStep() {
   const step = CALIBRATION_STEPS[calibration.stepIndex];
   calibrationStepEl.textContent = step.label;
   calibrationInstructionEl.textContent = step.instruction;
+
+  const isRateStep = step.metric === 'rate';
+  rateStepPanelEl.style.display = isRateStep ? 'block' : 'none';
+  calibrationCountdownEl.style.display = isRateStep ? 'none' : 'block';
+  if (isRateStep) {
+    calibration.selectedRate = DEFAULT_PERSONALIZED_RATE;
+    rateSliderEl.value = String(DEFAULT_PERSONALIZED_RATE);
+    updateRateSliderReadout();
+  }
+}
+
+// Entry 46: slider UI for the manual Speed step. Live-updates the readout
+// and calibration.selectedRate on every drag/arrow-key tick; nothing is
+// applied to the live app until finishRateStep() commits it, same
+// "preview vs commit" separation the old step had (sampling vs finish).
+function updateRateSliderReadout() {
+  const rate = parseFloat(rateSliderEl.value);
+  calibration.selectedRate = rate;
+  rateValueEl.textContent = `${rate.toFixed(2)}x`;
+}
+
+function testRateVoice() {
+  try {
+    const utterance = new SpeechSynthesisUtterance(SAMPLE_SENTENCE);
+    utterance.rate = calibration.selectedRate;
+    const voice = resolveSelectedVoice(window.speechSynthesis);
+    if (voice) utterance.voice = voice;
+    window.speechSynthesis.cancel(); // stop any previous preview before starting a new one
+    window.speechSynthesis.speak(utterance);
+  } catch (err) {
+    console.error('Test voice preview failed:', err);
+  }
+}
+
+// Confirms the slider's current value and advances past the rate step —
+// the manual-step equivalent of completeCalibrationStep() finishing a
+// timed mar/pose sample. Stores { rate } as this step's result; finishCalibration
+// reads it back via calibration.results.rate.rate.
+function finishRateStep() {
+  window.speechSynthesis.cancel(); // stop any in-progress test-voice preview
+  completeCalibrationStep(performance.now(), { rate: calibration.selectedRate });
 }
 
 // Called once per frame from predictLoop while calibration is active. Handles
@@ -1376,31 +1372,23 @@ function completeCalibrationStep(now, resultForStep) {
     calibration.phase = 'prep';
     calibration.phaseStartTime = now;
     calibration.currentSamples = [];
-    calibration.rateTracker = null;
     renderCalibrationStep();
+    // Entry 46: if the step we just moved into is the manual rate step,
+    // show its slider UI immediately — there's no prep countdown to wait
+    // through first (see renderCalibrationStep).
   }
 }
 
-// Phase 11 (rebuilt): scale for the Speed step's peak-trough word-boundary
-// detection, derived from the neutral/mutter steps already collected
-// (steps 1-2) — same source data the old absolute-threshold version used,
-// just used differently now (see RATE_PROMINENCE_FRACTION's comment above).
-function computeRateProminenceThreshold() {
-  const neutralMar = average(calibration.results.neutral.map(s => s.mar));
-  const mutterMar = average(calibration.results.mutter.map(s => s.mar));
-  const gap = Math.abs(mutterMar - neutralMar);
-  const threshold = Math.max(RATE_MIN_PROMINENCE, gap * RATE_PROMINENCE_FRACTION);
-  // TEMPORARY (Phase 11 threshold validation): every previous round tuned
-  // RATE_PROMINENCE_FRACTION without ever seeing the actual MAR-unit number
-  // it produces, or how it compares to real achieved swings (added below).
-  // This is that missing visibility.
-  console.log(`[Phase 11 rate] fixed threshold=${threshold.toFixed(4)} ` +
-    `(neutral=${neutralMar.toFixed(4)}, mutter=${mutterMar.toFixed(4)}, gap=${gap.toFixed(4)})`);
-  return threshold;
-}
-
+// Entry 46: the 'rate' step no longer runs through the per-frame prep/
+// sampling pipeline at all — it's a manual slider the user sets and
+// confirms via a button click (see renderCalibrationStep/finishRateStep
+// below), not something measured from live MAR frames. updateCalibration
+// is only ever called with mar/pose steps now; guard added defensively in
+// case it's ever invoked while a 'rate' step is current.
 function updateCalibration(mar) {
   const step = CALIBRATION_STEPS[calibration.stepIndex];
+  if (step.metric === 'rate') return; // handled entirely by the slider UI, not per-frame
+
   const now = performance.now();
   const elapsed = now - calibration.phaseStartTime;
 
@@ -1411,31 +1399,11 @@ function updateCalibration(mar) {
       calibration.phase = 'sampling';
       calibration.phaseStartTime = now;
       calibration.currentSamples = [];
-      if (step.metric === 'rate') {
-        calibration.rateTracker = {
-          smoothedMar: null,     // EMA state, seeded from the first sampling-phase frame
-          baselineValue: null,   // "at rest" MAR right after the countdown ends, before real movement is detected
-          baselineTime: 0,
-          direction: null,       // null -> 'unknown' (waiting for real movement) -> 'up' | 'down'
-          extremeValue: null,    // running peak (direction 'up') or trough (direction 'down') candidate
-          extremeTime: 0,
-          previousTroughTime: now, // fallback only — overwritten once real movement is first detected
-          wordIndex: 0,
-          durations: [],          // { word, syllables, durationMs }
-          prominenceThreshold: computeRateProminenceThreshold(),
-          lastPeakValue: null      // diagnostic only — see comment at the peak-confirm branch
-        };
-      }
     }
     return;
   }
 
   // phase === 'sampling'
-  if (step.metric === 'rate') {
-    updateRateCalibration(mar, now, step);
-    return;
-  }
-
   calibration.currentSamples.push({ mar });
   const remaining = Math.max(0, step.sampleMs - elapsed);
   calibrationCountdownEl.textContent = `Hold it... ${Math.ceil(remaining / 1000)}`;
@@ -1445,235 +1413,11 @@ function updateCalibration(mar) {
   }
 }
 
-// Phase 11 (rebuilt): live per-word timing for the Speed step, via
-// peak-trough envelope detection rather than absolute threshold crossing —
-// see the RATE_SMOOTHING_ALPHA/RATE_PROMINENCE_FRACTION comment above for
-// why the original simpler version (mirroring updateMouthState's
-// open/closed hysteresis) didn't hold up under real testing.
-// Records a confirmed word boundary (a trough) and advances to the next
-// expected word. Shared by the live zigzag confirmation below and the
-// timeout finalization at the end of this function.
-function recordRateWordBoundary(tracker, troughTime) {
-  const totalExpected = SAMPLE_WORDS.length * RATE_PASSES;
-  const word = SAMPLE_WORDS[tracker.wordIndex % SAMPLE_WORDS.length];
-  const passNumber = Math.floor(tracker.wordIndex / SAMPLE_WORDS.length) + 1;
-  if (word && tracker.wordIndex < totalExpected) {
-    const durationMs = troughTime - tracker.previousTroughTime;
-    tracker.durations.push({ word: word.text, syllables: word.syllables, durationMs });
-    // TEMPORARY (Phase 11 threshold validation, remove once
-    // MIN_RATE_WORDS_CAPTURED/MIN_RATE_SYLLABLE_SPREAD/clamp bounds are set
-    // from real data instead of starting guesses): live visibility into
-    // each word capture as it happens.
-    console.log(`[Phase 11 rate] word ${tracker.wordIndex + 1}/${totalExpected} (pass ${passNumber}) ` +
-      `"${word.text}" (${word.syllables} syll): ${Math.round(durationMs)}ms`);
-  }
-  tracker.wordIndex += 1;
-  tracker.previousTroughTime = troughTime;
-}
-
-function updateRateCalibration(mar, now, step) {
-  const tracker = calibration.rateTracker;
-  const elapsed = now - calibration.phaseStartTime;
-
-  // EMA smoothing — see RATE_SMOOTHING_ALPHA's comment above.
-  tracker.smoothedMar = tracker.smoothedMar === null
-    ? mar
-    : tracker.smoothedMar + RATE_SMOOTHING_ALPHA * (mar - tracker.smoothedMar);
-  const smoothed = tracker.smoothedMar;
-
-  // Zigzag extrema confirmation: only flip direction, and only confirm an
-  // extreme, once the signal has moved at least prominenceThreshold away
-  // from the running candidate — this is what rejects landmark jitter
-  // without needing an absolute "closed" crossing.
-  if (tracker.direction === null) {
-    // First frame of sampling: this is the "at rest" baseline, NOT the
-    // start of word 1. Bug found via live testing: word 1's duration was
-    // coming out wildly inconsistent (3s / 1.9s / 0.25s across three runs,
-    // uncorrelated with actual speed) because previousTroughTime was being
-    // seeded here, at the countdown's end — silently folding in whatever
-    // reaction-time gap the user took before actually starting to mouth
-    // the sentence. baselineValue/baselineTime below exist specifically so
-    // that gap can be excluded once we know when real movement began.
-    tracker.baselineValue = smoothed;
-    tracker.baselineTime = now;
-    tracker.direction = 'unknown';
-  } else if (tracker.direction === 'unknown') {
-    // Same prominence gate as the 'up'/'down' branches below — a plain
-    // frame-to-frame comparison here (the original version of this branch)
-    // committed to a direction on the very first frame of noise, which is
-    // exactly what let the reaction-time gap leak into word 1's duration
-    // in the first place.
-    if (smoothed - tracker.baselineValue >= tracker.prominenceThreshold) {
-      tracker.direction = 'up';
-      tracker.previousTroughTime = tracker.baselineTime; // real movement starts here, not at countdown-end
-      tracker.extremeValue = smoothed;
-      tracker.extremeTime = now;
-    } else if (tracker.baselineValue - smoothed >= tracker.prominenceThreshold) {
-      tracker.direction = 'down';
-      tracker.previousTroughTime = tracker.baselineTime;
-      tracker.extremeValue = smoothed;
-      tracker.extremeTime = now;
-    }
-    // else: still at rest, waiting for real movement — don't advance anything.
-  } else if (tracker.direction === 'up') {
-    if (smoothed > tracker.extremeValue) {
-      tracker.extremeValue = smoothed;
-      tracker.extremeTime = now;
-    } else if (tracker.extremeValue - smoothed >= tracker.prominenceThreshold) {
-      // Confirmed peak (mid-word) — start tracking the trough candidate
-      // that follows it. The peak itself isn't recorded as a word-boundary
-      // event; only troughs mark those. lastPeakValue is kept for
-      // diagnostic swing logging only (see the trough branch below) — it
-      // deliberately does NOT feed back into prominenceThreshold this time,
-      // unlike the reverted adaptive attempt.
-      tracker.lastPeakValue = tracker.extremeValue;
-      tracker.direction = 'down';
-      tracker.extremeValue = smoothed;
-      tracker.extremeTime = now;
-    }
-  } else if (tracker.direction === 'down') {
-    if (smoothed < tracker.extremeValue) {
-      tracker.extremeValue = smoothed;
-      tracker.extremeTime = now;
-    } else if (smoothed - tracker.extremeValue >= tracker.prominenceThreshold) {
-      // Swing is big enough to be a real trough — but only confirm it if
-      // enough real time has passed since the last one (refractory period,
-      // see MIN_INTER_TROUGH_MS). If not, DON'T flip direction or reset the
-      // candidate: keep tracking the current running minimum as-is (a
-      // still-lower dip in the meantime correctly replaces it via the
-      // branch above), so once the refractory window opens we confirm
-      // using the true deepest point reached, not just "wherever we
-      // happened to be when the timer allowed it."
-      if (now - tracker.previousTroughTime >= MIN_INTER_TROUGH_MS) {
-        // TEMPORARY (Phase 11 threshold validation): the actual achieved
-        // swing size for this word, in the same MAR units as
-        // prominenceThreshold — so we can finally see how close real
-        // successful swings run to the threshold, instead of only seeing
-        // pass/fail outcomes.
-        if (tracker.lastPeakValue !== null) {
-          const swing = tracker.lastPeakValue - tracker.extremeValue;
-          console.log(`[Phase 11 rate] swing=${swing.toFixed(4)} vs threshold=${tracker.prominenceThreshold.toFixed(4)}`);
-        }
-        recordRateWordBoundary(tracker, tracker.extremeTime);
-        tracker.direction = 'up';
-        tracker.extremeValue = smoothed;
-        tracker.extremeTime = now;
-      }
-    }
-  }
-
-  const remaining = Math.max(0, step.sampleMs - elapsed);
-  const totalExpected = SAMPLE_WORDS.length * RATE_PASSES;
-  const finishedAllWords = tracker.wordIndex >= totalExpected;
-
-  if (!finishedAllWords) {
-    const targetWord = SAMPLE_WORDS[tracker.wordIndex % SAMPLE_WORDS.length];
-    // Deliberately generic — no word name shown here. Live testing showed
-    // naming the target word turned "mouth at your natural pace" into
-    // "watch the screen and react to it": users started consciously pacing
-    // against the display (rushing words they knew would register easily,
-    // lingering on ones they weren't sure about), which is exactly the
-    // opposite of what this step is trying to measure. Stall detection
-    // below still runs exactly the same — it just doesn't need to be
-    // visible to work, only to fail visibly when it actually catches
-    // something.
-    calibrationCountdownEl.textContent =
-      `Captured ${tracker.durations.length} of ${totalExpected} words... ${Math.ceil(remaining / 1000)}`;
-
-    // Stall detection: how long have we been waiting for THIS word's
-    // trough, versus a generous multiple of its generic estimated
-    // duration? Deliberately generous (5x, floored at 2.5s) — this isn't
-    // trying to catch a slightly-slow word, only a genuinely stuck
-    // detection where the user has likely already started repeating.
-    const stallDeadline = Math.max(
-      RATE_STALL_MIN_MS,
-      estimateWordDuration(targetWord.text) * RATE_STALL_FACTOR
-    );
-    if (now - tracker.previousTroughTime > stallDeadline) {
-      showCalibrationFailure(
-        `Got stuck detecting "${targetWord.text}" (word ${tracker.wordIndex + 1} of ${totalExpected}). ` +
-        'Rather than continue with a misaligned run, this attempt is being discarded — retry and try ' +
-        'mouthing each word a little more distinctly, with a brief pause between words.'
-      );
-      return;
-    }
-  }
-
-  // Early completion: don't make a mumbler who finished the sentence sit
-  // through a 20s timeout just because that's the ceiling we set for
-  // stragglers.
-  if (finishedAllWords) {
-    completeCalibrationStep(now, tracker.durations);
-    return;
-  }
-  if (elapsed >= step.sampleMs) {
-    // Timeout mid-word: if the signal was still descending toward a trough
-    // when time ran out (the common shape for "stopped right after the
-    // last word, never swung back up"), credit the current best trough
-    // candidate rather than silently dropping the last captured word.
-    if (tracker.direction === 'down') {
-      recordRateWordBoundary(tracker, tracker.extremeTime);
-    }
-    completeCalibrationStep(now, tracker.durations);
-  }
-}
-
-// Ordinary least-squares fit of durationMs ≈ baseWordMs + msPerSyllable * syllables,
-// over the captured { syllables, durationMs } pairs from the Speed step.
-// Returns null if the fit is degenerate (near-zero denominator — happens
-// when captured words don't have enough syllable-count spread, e.g. all
-// 1-syllable), so the caller can reject rather than trust a wild/undefined
-// slope. Standard closed-form two-parameter OLS, chosen over averaging a
-// single word-rate ratio because it's the simplest method that can actually
-// separate a fixed per-word overhead from a per-syllable rate — see
-// MIN_RATE_SYLLABLE_SPREAD's comment for why that separation needs variety
-// in the x values (syllable counts), not just more data points.
-function median(values) {
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
-}
-
-// Rejects hesitation/thinking-pause outliers from the Speed step's captures
-// before they reach the regression — see RATE_OUTLIER_Z_THRESHOLD's comment
-// for why this is necessary even after the reaction-time fix above. Uses
-// PACE (durationMs / syllables) rather than raw duration so a genuinely
-// slow long word isn't penalized just for being long.
-function filterRateOutliers(captures) {
-  const paces = captures.map(c => c.durationMs / c.syllables);
-  const med = median(paces);
-  const mad = median(paces.map(p => Math.abs(p - med)));
-  if (mad < 1e-6) return captures; // no spread to judge outliers against — keep everything
-
-  const kept = [];
-  const rejected = [];
-  captures.forEach((c, i) => {
-    const modifiedZ = 0.6745 * (paces[i] - med) / mad;
-    (Math.abs(modifiedZ) <= RATE_OUTLIER_Z_THRESHOLD ? kept : rejected).push(c);
-  });
-  if (rejected.length > 0) {
-    // TEMPORARY (Phase 11 threshold validation): visibility into what got
-    // rejected and why, so RATE_OUTLIER_Z_THRESHOLD can be tuned from real
-    // runs instead of guessed.
-    console.log(`[Phase 11 rate] outliers rejected: ${rejected.map(c => c.word).join(', ')}`);
-  }
-  return kept;
-}
-
-function fitDurationRegression(points) {
-  const n = points.length;
-  const sumX = points.reduce((s, p) => s + p.syllables, 0);
-  const sumY = points.reduce((s, p) => s + p.durationMs, 0);
-  const sumXY = points.reduce((s, p) => s + p.syllables * p.durationMs, 0);
-  const sumXX = points.reduce((s, p) => s + p.syllables * p.syllables, 0);
-
-  const denominator = n * sumXX - sumX * sumX;
-  if (Math.abs(denominator) < 1e-6) return null;
-
-  const msPerSyllable = (n * sumXY - sumX * sumY) / denominator;
-  const baseWordMs = (sumY - msPerSyllable * sumX) / n;
-  return { msPerSyllable, baseWordMs };
-}
+// REMOVED Entry 46: recordRateWordBoundary, updateRateCalibration, median,
+// filterRateOutliers, fitDurationRegression — the entire peak-trough
+// tracker + OLS regression + outlier-rejection stack. Replaced by the
+// manual slider + interpolateCadence() above. See PROGRESS.md Section 3
+// for the full reasoning.
 
 function finishCalibration() {
   const neutralMar = average(calibration.results.neutral.map(s => s.mar));
@@ -1693,68 +1437,6 @@ function finishCalibration() {
     return;
   }
 
-  // Phase 11: second failure mode — the Speed step's captured word timings
-  // weren't usable for a regression. Two distinct causes get one combined
-  // check each, same "reject don't silently save" pattern as the two checks
-  // above.
-  const rateCaptures = calibration.results.rate || [];
-  // TEMPORARY (Phase 11 threshold validation, remove alongside the log in
-  // updateRateCalibration once thresholds are set from real data): one-line
-  // summary per run, before any pass/fail branching below, so a failed run
-  // is just as inspectable as a successful one.
-  console.log(`[Phase 11 rate] run summary: ${rateCaptures.length}/${SAMPLE_WORDS.length * RATE_PASSES} words captured, ` +
-    `syllables ${rateCaptures.map(c => c.syllables).join(',')}`);
-  if (rateCaptures.length < MIN_RATE_WORDS_CAPTURED) {
-    showCalibrationFailure(
-      `Only captured ${rateCaptures.length} of ${SAMPLE_WORDS.length * RATE_PASSES} words in the pace step. ` +
-      'Try mouthing the whole sentence more clearly, pausing briefly between words, then retry.'
-    );
-    return;
-  }
-
-  // Reject hesitation/thinking-pause outliers before trusting anything else
-  // about this run — see RATE_OUTLIER_Z_THRESHOLD's comment. Checked again
-  // for count after filtering: a run with borderline capture count that
-  // then loses several words to outlier rejection isn't reliable either.
-  const inlierCaptures = filterRateOutliers(rateCaptures);
-  if (inlierCaptures.length < MIN_RATE_WORDS_CAPTURED) {
-    showCalibrationFailure(
-      `Captured ${rateCaptures.length} words, but too many looked like pauses/hesitations rather ` +
-      'than steady reading pace to trust. Try mouthing the sentence at a more even rhythm, then retry.'
-    );
-    return;
-  }
-  const capturedSyllables = inlierCaptures.map(c => c.syllables);
-  const syllableSpread = Math.max(...capturedSyllables) - Math.min(...capturedSyllables);
-  if (syllableSpread < MIN_RATE_SYLLABLE_SPREAD) {
-    showCalibrationFailure(
-      'The pace step didn\'t capture enough variety between short and long words to measure ' +
-      'your speed accurately. Try mouthing the full sentence, including the longer words, then retry.'
-    );
-    return;
-  }
-  const fit = fitDurationRegression(inlierCaptures.map(c => ({ syllables: c.syllables, durationMs: c.durationMs })));
-  if (!fit) {
-    showCalibrationFailure(
-      'Couldn\'t reliably measure your pace from that run. Try mouthing the sentence at a steady, ' +
-      'natural rhythm, then retry.'
-    );
-    return;
-  }
-  // TEMPORARY (Phase 11 threshold validation): raw fit before clamping, so
-  // MIN/MAX_MS_PER_SYLLABLE and MIN/MAX_BASE_WORD_MS can be set from what a
-  // real fit actually produces rather than a starting guess. If this number
-  // is regularly landing near/outside the clamp bounds below, that's the
-  // signal the bounds are wrong, not the fit.
-  console.log(`[Phase 11 rate] raw fit: msPerSyllable=${fit.msPerSyllable.toFixed(1)}, ` +
-    `baseWordMs=${fit.baseWordMs.toFixed(1)}`);
-  // Same numbers, on-screen — console.log requires a tethered debugging
-  // session on mobile, this doesn't. Filled in fully once personalizedRate
-  // is computed below.
-  const rateFitDebugValueEl = document.getElementById('rateFitDebugValue');
-  rateFitDebugValueEl.textContent =
-    `raw msPerSyll=${fit.msPerSyllable.toFixed(1)}, raw baseWordMs=${fit.baseWordMs.toFixed(1)}`;
-
   // Same margin logic used by hand for the original OPEN/CLOSE thresholds:
   // sit closeThreshold and openThreshold inside the neutral-to-mutter gap,
   // in that order, so the existing hysteresis check (open above, close
@@ -1762,43 +1444,20 @@ function finishCalibration() {
   const closeThreshold = neutralMar + marGap * 0.33;
   const openThreshold = neutralMar + marGap * 0.67;
 
-  // Phase 11: clamp the regression to a sane range before trusting it — a
-  // technically-valid fit (passed the spread/count checks above) can still
-  // land somewhere unreasonable from noise in a short run, so both a floor
-  // and a ceiling apply (too twitchy / too sluggish a pace are both
-  // plausible failure shapes).
-  const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
-  const msPerSyllablePersonal = clamp(fit.msPerSyllable, MIN_MS_PER_SYLLABLE, MAX_MS_PER_SYLLABLE);
-  const baseWordMsPersonal = clamp(fit.baseWordMs, MIN_BASE_WORD_MS, MAX_BASE_WORD_MS);
+  // Entry 46: rate/cadence numbers now come from the manual slider, not a
+  // regression — no fit to reject/clamp, the user's chosen value IS the
+  // rate, and interpolateCadence() derives the matching cadence-gating
+  // pair from it. See RATE_ANCHORS' comment for how those anchor points
+  // were chosen.
+  const personalizedRate = calibration.results.rate.rate;
+  const cadence = interpolateCadence(personalizedRate);
+  const msPerSyllablePersonal = cadence.msPerSyllable;
+  const baseWordMsPersonal = cadence.baseWordMs;
 
-  // Personalized TTS rate: ratio of the GENERIC expected duration to THIS
-  // user's personalized expected duration, evaluated at the sample
-  // sentence's average syllable count. A fast mumbler (shorter personal
-  // durations) gets ratio > 1 → faster TTS to match; a slow mumbler gets
-  // ratio < 1 → slower TTS. Deliberately derived from the same fit as
-  // MS_PER_SYLLABLE/BASE_WORD_MS above, not measured independently — see
-  // Section 3/Entry 15: speeding up TTS without also adjusting mouth-close
-  // cadence (or vice versa) would make the app race ahead of, or lag
-  // behind, the very pace it just measured.
-  // Evaluated at the SAMPLE_WORDS average (fixed), not the surviving inlier
-  // subset's average — keeps the evaluation point stable across runs
-  // regardless of which specific words got filtered as outliers.
-  const avgSyllables = SAMPLE_WORDS.reduce((s, w) => s + w.syllables, 0) / SAMPLE_WORDS.length;
-  const genericExpected = DEFAULT_BASE_WORD_MS + DEFAULT_MS_PER_SYLLABLE * avgSyllables;
-  const personalExpected = baseWordMsPersonal + msPerSyllablePersonal * avgSyllables;
-  const personalizedRate = clamp(
-    genericExpected / personalExpected,
-    MIN_PERSONALIZED_RATE,
-    MAX_PERSONALIZED_RATE
-  );
-  // TEMPORARY (Phase 11 threshold validation): pre-clamp rate ratio, same
-  // reasoning as the raw-fit log above — validates MIN/MAX_PERSONALIZED_RATE.
-  console.log(`[Phase 11 rate] pre-clamp personalizedRate=${(genericExpected / personalExpected).toFixed(3)}, ` +
-    `clamped=${personalizedRate.toFixed(3)}`);
+  const rateFitDebugValueEl = document.getElementById('rateFitDebugValue');
   rateFitDebugValueEl.textContent =
-    `raw msPerSyll=${fit.msPerSyllable.toFixed(1)}, raw baseWordMs=${fit.baseWordMs.toFixed(1)}, ` +
-    `clamped msPerSyll=${msPerSyllablePersonal.toFixed(1)}, clamped baseWordMs=${baseWordMsPersonal.toFixed(1)}, ` +
-    `pre-clamp rate=${(genericExpected / personalExpected).toFixed(3)}, final rate=${personalizedRate.toFixed(3)}`;
+    `manual rate=${personalizedRate.toFixed(2)}x, interpolated msPerSyll=${msPerSyllablePersonal.toFixed(1)}, ` +
+    `baseWordMs=${baseWordMsPersonal.toFixed(1)}`;
 
   const data = {
     openThreshold,
@@ -1898,6 +1557,20 @@ function loadSavedCalibration() {
 calibrateBtn.addEventListener('click', startCalibration);
 calibrationCancelBtn.addEventListener('click', cancelCalibration);
 calibrationRetryBtn.addEventListener('click', startCalibration);
+
+// Entry 46: manual Speed step controls.
+const rateStepPanelEl = document.getElementById('rateStepPanel');
+const rateSliderEl = document.getElementById('rateSlider');
+const rateValueEl = document.getElementById('rateValue');
+const rateTestVoiceBtn = document.getElementById('rateTestVoiceBtn');
+const rateFinishBtn = document.getElementById('rateFinishBtn');
+
+rateSliderEl.min = String(RATE_SLIDER_MIN);
+rateSliderEl.max = String(RATE_SLIDER_MAX);
+rateSliderEl.step = '0.01';
+rateSliderEl.addEventListener('input', updateRateSliderReadout);
+rateTestVoiceBtn.addEventListener('click', testRateVoice);
+rateFinishBtn.addEventListener('click', finishRateStep);
 
 function buildWordSpans(text) {
   readingTextEl.innerHTML = '';
@@ -2197,7 +1870,7 @@ function onWordClick(wordIndex) {
 
   // If the mouth is already open and a face is visible at click time, don't
   // make the reader close-then-reopen their mouth just to kick things off.
-  if (mouthState === 'open' && isFaceVisible) {
+  if (mouthState === 'open' && isFaceVisible && manualSpeechEnabled) {
     speakFrom(baseOffset);
   }
 }
@@ -2418,13 +2091,145 @@ function updateMouthState(mar) {
   mouthStateEl.textContent = mouthState;
 }
 
+// --- Manual ON/OFF speech switch (Entry 45+) ---
+// A user-controlled pause layered ALONGSIDE mouth-tracking, not replacing
+// it — added after head-pose removal to give the reader an explicit,
+// deliberate way to pause (interruption, dry mouth throwing off MAR, wants
+// to think) without relying on the app to infer disengagement. Hard-stop on
+// OFF per explicit decision: cancels immediately, no partial-word grace.
+// Deliberately does NOT touch mouthState — the mouth may still be
+// physically open; this is independent of the mouth-open/closed signal.
+let manualSpeechEnabled = true;
+const speechSwitchBtn = document.getElementById('speechSwitchBtn');
+const switchDebugValueEl = document.getElementById('switchDebugValue');
+
+function updateSpeechSwitchUI() {
+  speechSwitchBtn.setAttribute('aria-pressed', manualSpeechEnabled ? 'true' : 'false');
+  speechSwitchBtn.querySelector('.switch-state').textContent = manualSpeechEnabled ? 'ON' : 'OFF';
+  speechSwitchBtn.title = manualSpeechEnabled ? 'Pause reading (Space)' : 'Resume reading (Space)';
+  if (switchDebugValueEl) switchDebugValueEl.textContent = manualSpeechEnabled ? 'on' : 'off';
+}
+
+function setManualSpeechEnabled(enabled) {
+  if (enabled === manualSpeechEnabled) return;
+  manualSpeechEnabled = enabled;
+  updateSpeechSwitchUI();
+  if (!manualSpeechEnabled) {
+    if (isSpeakingChunk) {
+      manualCancel = true;
+      cancelRequestedTime = performance.now();
+      cancelActiveSpeech();
+      isSpeakingChunk = false;
+    }
+    speechStateEl.textContent = 'paused (switch off)';
+  } else if (mouthState === 'open') {
+    // Recovery pattern matching isFaceVisible/tab-visibility: resume
+    // immediately if the mouth is already open when flipped back on.
+    onMouthOpen();
+  } else {
+    speechStateEl.textContent = 'waiting for mouth to open';
+  }
+}
+
+function toggleManualSpeechSwitch() {
+  if (!readingActive) return; // no-op outside an active session
+  setManualSpeechEnabled(!manualSpeechEnabled);
+}
+
+// Resets to enabled+ON at the start of every fresh session (startBtn click)
+// so a previous session's OFF state can't silently carry into a new one.
+function resetSpeechSwitch() {
+  manualSpeechEnabled = true;
+  updateSpeechSwitchUI();
+}
+
+speechSwitchBtn.addEventListener('click', () => toggleManualSpeechSwitch());
+
+// --- Plain-English trouble explainer (Entry 45+) ---
+// The ambient red border (Phase 11b) signals THAT something's off but not
+// WHAT — this fills that gap without a popup/toast (which would interrupt
+// reading, the exact thing Phase 11b's design note argues against). Single
+// message at a time by priority, not a stack: a deliberate user pause is
+// always the most relevant thing to tell them, even if e.g. a cadence
+// stall is also technically true underneath it.
+const WARNING_MESSAGES = {
+  'switch-off': 'Reading is paused — flip the switch (or press Space) to resume.',
+  'no-face': "Can't see your face — check your camera or lighting.",
+  'cadence': 'Taking a while on this word — no rush, just checking in.'
+};
+// Threshold on the ALREADY-smoothed trouble score (slow-accumulate/
+// fast-recover, same as the ambient border) rather than a new debounce —
+// this is what gives "don't show every borderline frame" for free. Starting
+// guess, same tier as every other unvalidated constant in this project —
+// tune from real use if it feels early/late.
+const WARNING_BOX_TROUBLE_THRESHOLD = 0.35;
+// Fast-recover means the raw score itself can drop back under threshold
+// within a frame or two of a stall resolving — gating display purely on the
+// instantaneous score made the cadence message flash for well under a
+// second, unreadable. Once triggered, hold it visible for a real minimum
+// window instead of re-checking the raw score every frame.
+const WARNING_BOX_MIN_DISPLAY_MS = 3000;
+let cadenceWarningActiveUntil = 0;
+
+let currentWarningReason = null;
+let warningBoxMinimized = false;
+const warningBoxEl = document.getElementById('warningBox');
+const warningTextEl = document.getElementById('warningText');
+const warningMinimizeBtnEl = document.getElementById('warningMinimizeBtn');
+const warningDebugValueEl = document.getElementById('warningDebugValue');
+
+function computeWarningReason() {
+  if (!readingActive) return null;
+  if (!manualSpeechEnabled) return 'switch-off'; // highest priority — always wins
+  if (!isFaceVisible) return 'no-face';
+  const now = performance.now();
+  if (displayedTroubleScore >= WARNING_BOX_TROUBLE_THRESHOLD) {
+    cadenceWarningActiveUntil = now + WARNING_BOX_MIN_DISPLAY_MS;
+  }
+  if (now < cadenceWarningActiveUntil) return 'cadence';
+  return null;
+}
+
+function updateWarningBoxMinimizedUI() {
+  warningBoxEl.classList.toggle('warning-minimized', warningBoxMinimized);
+  warningMinimizeBtnEl.setAttribute('aria-label', warningBoxMinimized ? 'Expand warning' : 'Minimize warning');
+  warningMinimizeBtnEl.title = warningBoxMinimized ? 'Expand' : 'Minimize';
+}
+
+// Called once per frame from updateTroubleShading (same cadence as the
+// ambient border, skipped during calibration for the same reason).
+function updateWarningBox() {
+  const reason = computeWarningReason();
+  if (reason !== currentWarningReason) {
+    currentWarningReason = reason;
+    warningDebugValueEl.textContent = reason || 'none';
+    if (reason === null) {
+      warningBoxEl.classList.add('warning-hidden');
+    } else {
+      warningTextEl.textContent = WARNING_MESSAGES[reason];
+      warningBoxEl.classList.remove('warning-hidden');
+      // A NEW condition always re-expands, even if the reader minimized a
+      // previous one — minimizing means "not this one right now", not
+      // "never tell me anything again".
+      warningBoxMinimized = false;
+      updateWarningBoxMinimizedUI();
+    }
+  }
+}
+
+warningMinimizeBtnEl.addEventListener('click', () => {
+  warningBoxMinimized = !warningBoxMinimized;
+  updateWarningBoxMinimizedUI();
+});
+
 function onMouthOpen() {
   // Phase 12d diagnostic: if a "repeat/next-word mouth action" is what
   // releases a stall, THIS call is that action landing — log which guard
   // (if any) makes it a no-op, so a stall can be traced to "the resume
   // never actually fired" vs. "it fired but resumed from the wrong place."
-  console.log(`[Phase 12d diag] onMouthOpen() | isFaceVisible=${isFaceVisible} readingActive=${readingActive} isSpeakingChunk=${isSpeakingChunk} resumeOffset=${baseOffset + lastBoundaryOffset}`);
+  console.log(`[Phase 12d diag] onMouthOpen() | isFaceVisible=${isFaceVisible} manualSpeechEnabled=${manualSpeechEnabled} readingActive=${readingActive} isSpeakingChunk=${isSpeakingChunk} resumeOffset=${baseOffset + lastBoundaryOffset}`);
   if (!isFaceVisible) return; // gated: don't resume while no face is detected (Phase 9b; head-pose gate removed Entry 45)
+  if (!manualSpeechEnabled) return; // gated: user has manually paused via the switch
   if (!readingActive) return; // no active reading session
   if (isSpeakingChunk) return; // already flowing, nothing to do
 
@@ -2632,6 +2437,7 @@ function finishReading() {
   }
   activeWordIndex = -1;
   resetTroubleShading(); // Phase 11b: no active session left to reflect, so settle the border calm
+  resetSpeechSwitch();
 }
 
 startBtn.addEventListener('click', () => {
@@ -2662,6 +2468,7 @@ startBtn.addEventListener('click', () => {
   if (resumeAutoScrollTimer !== null) { clearTimeout(resumeAutoScrollTimer); resumeAutoScrollTimer = null; }
   marBuffer = []; // fresh window so a stale pre-click buffer can't cause a false stop
   resetTroubleShading(); // Phase 11b: fresh session shouldn't inherit a lingering score/pulse cooldown
+  resetSpeechSwitch(); // fresh session shouldn't inherit a previous session's OFF state
   speechStateEl.textContent = 'waiting for mouth to open';
 
   // If the mouth is already open right when the button is clicked, start
@@ -2701,6 +2508,14 @@ document.addEventListener('visibilitychange', () => {
       mouthState = 'closed';
       mouthStateEl.textContent = mouthState;
       facingStateEl.textContent = 'tab hidden — reading paused';
+      // Entry 45 fix: force a fresh face-visible confirmation once the tab
+      // returns, so this label doesn't linger forever. Before head-pose
+      // removal, updateHeadPose() ran every frame and overwrote this label
+      // as a side effect of its own pose check; that side effect is gone
+      // now, so predictLoop's face-reappear branch needs an actual
+      // false->true transition to fire and update the text. Same "recovery
+      // is free" pattern as the no-face timeout.
+      isFaceVisible = false;
     }
     noFaceSince = null;
   } else {
@@ -2854,6 +2669,11 @@ function predictLoop() {
   // skip rather than a correctness-critical one.
   if (!calibration.active) {
     updateTroubleShading();
+    // Entry 45+ fix: sync every frame off readingActive directly, rather
+    // than each call site (startBtn, onWordClick, finishReading...)
+    // remembering to update it — onWordClick can also start a session
+    // independent of startBtn, and was the one path this got missed on.
+    speechSwitchBtn.classList.toggle('is-inactive', !readingActive);
   }
 
   scheduleNextFrame();

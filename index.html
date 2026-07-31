@@ -26,6 +26,7 @@
       --accent-coral: #E8752E;
       --accent-pink: #C93C7A;
       --text-danger: #FF6B6B;
+      --surface-danger: #33191C;
       --radius: 10px;
       --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     }
@@ -87,6 +88,37 @@
     #calibrateBtn:hover:not(:disabled) { border-color: var(--accent-amber); }
     #loadTextBtn:hover:not(:disabled) { border-color: var(--accent-coral); }
     input[type="checkbox"] { accent-color: var(--accent-pink); }
+    /* Entry 46: Speed step slider. accent-color alone doesn't reliably
+       enlarge the thumb across browsers, so track/thumb are styled
+       explicitly for a generous touch/click target (accessibility —
+       see PROGRESS.md Section 2's cross-device/motor-control notes). */
+    input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      height: 8px;
+      border-radius: 4px;
+      background: var(--surface-raised);
+      border: 1px solid var(--border-strong);
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      background: var(--accent-teal);
+      border: 2px solid #06110D;
+      cursor: pointer;
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      background: var(--accent-teal);
+      border: 2px solid #06110D;
+      cursor: pointer;
+    }
+    input[type="range"]:focus { outline: 2px solid var(--accent-teal); outline-offset: 3px; }
     #startBtn:not(:disabled) {
       background: var(--accent-teal-dim);
       border-color: var(--accent-teal);
@@ -158,6 +190,113 @@
       border: 4px solid transparent;
       background: var(--surface);
       transition: border-color 200ms ease-out;
+      position: relative;
+    }
+    /* Entry 45+: floating controls row — sticky (not fixed) so it aligns
+       naturally with the reading pane's own width/position on any screen
+       size (no JS position-sync needed) and hovers over the text as the
+       page scrolls through a long piece of reading, rather than scrolling
+       away with it. pointer-events:none on the row + auto on children so
+       the empty space beside the switch never blocks clicking/selecting
+       the text underneath. */
+    #readingControls {
+      position: sticky;
+      top: 10px;
+      z-index: 20;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-bottom: 8px;
+      pointer-events: none;
+    }
+    #readingControls > * { pointer-events: auto; }
+    /* Entry 45+: plain-English trouble explainer, replaces the ambient
+       red-border's silence about WHY it's red. Only one reason shown at a
+       time (JS priority: switch-off > no-face > cadence-stall) — see
+       computeWarningReason() — so this never stacks multiple messages.
+       Hangs off the same smoothed trouble score + pulse cooldown the
+       ambient border already uses, so it inherits "sustained trouble only,
+       not every borderline frame" for free rather than a second debounce
+       system. Minimizable; re-expands automatically on a NEW condition
+       (not just "still the same one"), so minimizing isn't a silence
+       toggle. */
+    .warning-box {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      max-width: 240px;
+      background: var(--surface-danger);
+      border: 1px solid var(--text-danger);
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 12.5px;
+      line-height: 1.35;
+      color: var(--text-primary);
+      box-shadow: 0 3px 10px rgba(0,0,0,0.4);
+    }
+    .warning-icon {
+      flex-shrink: 0;
+      font-size: 15px;
+      line-height: 1;
+    }
+    .warning-box.warning-hidden { display: none; }
+    .warning-box.warning-minimized { max-width: none; padding: 6px 8px; }
+    .warning-box.warning-minimized .warning-text { display: none; }
+    .warning-min-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-danger);
+      font-size: 16px;
+      line-height: 1;
+      cursor: pointer;
+      padding: 0 2px;
+      flex-shrink: 0;
+    }
+    .warning-box.warning-minimized .warning-min-btn { transform: rotate(45deg); } /* − becomes a "+"-like reopen cue */
+    .speech-switch {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--surface-raised);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 6px 12px 6px 8px;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      box-shadow: 0 3px 10px rgba(0,0,0,0.4);
+    }
+    .speech-switch:hover:not(.is-inactive) { border-color: var(--accent-teal); }
+    .speech-switch.is-inactive { opacity: 0.4; cursor: not-allowed; }
+    .switch-track {
+      position: relative;
+      width: 32px;
+      height: 18px;
+      border-radius: 999px;
+      background: var(--border-strong);
+      transition: background 180ms ease;
+      flex-shrink: 0;
+    }
+    .switch-thumb {
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--text-danger);
+      transition: transform 180ms ease, background 180ms ease;
+    }
+    .speech-switch[aria-pressed="true"] .switch-track { background: var(--accent-teal); }
+    .speech-switch[aria-pressed="true"] .switch-thumb { transform: translateX(14px); background: #06110D; }
+    /* Compact form on narrow/portrait screens (Entry 45+): text label hides,
+       leaving just the track+thumb + a title tooltip, so the switch stays a
+       small corner badge rather than crowding a mobile-width reading pane. */
+    @media (max-width: 480px) {
+      .speech-switch { padding: 6px 8px; }
+      .speech-switch .switch-state { display: none; }
+      .warning-box { max-width: 200px; font-size: 12px; }
     }
     /* Separate fast/sharp cue (Entry 17 Q2) for hard failures — a stuck word
        or a head-pose gate trip — layered on TOP of the slow ambient drift via
@@ -291,6 +430,22 @@
     <div id="calibrationStep" style="font-weight: 600;"></div>
     <div id="calibrationInstruction" style="margin-top: 6px; color: var(--text-secondary);"></div>
     <div id="calibrationCountdown" style="margin-top: 6px; font-family: monospace;"></div>
+    <!-- Entry 46: manual Speed step. Slider is continuous (0.5x-1.75x, not
+         discrete steps) — see PROGRESS.md Section 3 for why. Large slider
+         track + keyboard-arrow-steppable (native <input type="range">
+         behavior) for accessibility; big tap target on the thumb via CSS. -->
+    <div id="rateStepPanel" style="display:none; margin-top: 10px;">
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <span class="intro-text" style="font-size: 12px;">Slower</span>
+        <input type="range" id="rateSlider" style="flex: 1;" aria-label="Reading speed">
+        <span class="intro-text" style="font-size: 12px;">Faster</span>
+      </div>
+      <div style="margin-top: 6px; display: flex; align-items: center; gap: 12px;">
+        <span id="rateValue" style="font-family: monospace; font-weight: 600;">1.00x</span>
+        <button id="rateTestVoiceBtn" type="button">&#9654; Test voice</button>
+        <button id="rateFinishBtn" type="button">Set speed</button>
+      </div>
+    </div>
     <div id="calibrationMessage" style="margin-top: 6px; color: var(--text-danger);"></div>
     <button id="calibrationCancelBtn" style="margin-top: 8px;">Cancel</button>
     <button id="calibrationRetryBtn" style="margin-top: 8px; display:none;">Retry</button>
@@ -317,6 +472,19 @@
   </div>
 
   <div id="readingPane">
+    <div id="readingControls">
+      <div id="warningBox" class="warning-box warning-hidden" role="status">
+        <span class="warning-icon" aria-hidden="true">&#9888;</span>
+        <span id="warningText" class="warning-text"></span>
+        <button id="warningMinimizeBtn" class="warning-min-btn" type="button"
+          title="Minimize" aria-label="Minimize warning">&minus;</button>
+      </div>
+      <button id="speechSwitchBtn" class="speech-switch is-inactive" type="button" aria-pressed="true"
+        title="Pause reading (Space)">
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+        <span class="switch-state">ON</span>
+      </button>
+    </div>
     <div id="readingText"></div>
   </div>
 
@@ -327,6 +495,8 @@
       <div>Mouth state: <span id="mouthState">-</span></div>
       <div>Speech state: <span id="speechState">-</span></div>
       <div>Face detection: <span id="facingState">face detected</span></div>
+      <div>Manual switch: <span id="switchDebugValue">on</span></div>
+      <div>Warning box reason: <span id="warningDebugValue">none</span></div>
       <div>Movement range: <span id="movementRangeValue">-</span></div>
       <div>Cadence (elapsed/expected): <span id="cadenceValue">-</span></div>
       <div>Calibration: <span id="calibrationStatusValue">using default thresholds</span></div>
