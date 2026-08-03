@@ -44,10 +44,73 @@
       background-attachment: fixed;
       color: var(--text-primary);
       font-family: var(--font-sans);
-      margin: 0 auto;
+      margin: 0;
       padding: 32px 24px 64px;
       line-height: 1.5;
-      max-width: 720px;
+    }
+
+    /* Entry 52: layout restructure — previously the whole page (including
+       the debug panel) was one column capped at 720px, which left large
+       empty margins on anything wider than a laptop-in-portrait window
+       (flagged by the student on real laptop landscape use). Two changes:
+       (1) #appLayout now owns the page's overall width/centering instead
+       of <body> itself, so body can stay full-width while the CONTENT
+       still has a deliberate max width; (2) on wide viewports, the debug
+       panel moves into a sticky side column instead of stacking below
+       everything, which is what actually uses the freed-up width
+       meaningfully — reading-related content (readingPane, textInputPanel)
+       keeps its own comfortable line length rather than being stretched
+       edge-to-edge, since long lines hurt readability regardless of how
+       much monitor width is available. Below the breakpoint, #sideColumn
+       just falls back to normal block stacking (same order as before),
+       so phones/tablets/narrow windows are unaffected — the two-column
+       arrangement is purely a wide-viewport upgrade, not a redesign of
+       the narrow layout that was already working.
+       Breakpoint (1040px) is set so it engages on real laptop-landscape
+       widths (most laptops are 1280px+ wide) but not on a typical portrait
+       tablet or a narrower/split browser window. */
+    #appLayout {
+      max-width: 1160px;
+      margin: 0 auto;
+    }
+    #mainColumn {
+      max-width: 700px;
+      margin: 0 auto;
+    }
+    #sideColumn {
+      max-width: 700px;
+      margin: 16px auto 0;
+    }
+    .side-column-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 8px;
+    }
+    @media (min-width: 1040px) {
+      #appLayout {
+        display: grid;
+        grid-template-columns: minmax(0, 700px) minmax(280px, 360px);
+        gap: 40px;
+        align-items: start;
+      }
+      #mainColumn { margin: 0; }
+      #sideColumn {
+        margin: 0;
+        max-width: none;
+        position: sticky;
+        top: 24px;
+        /* Bug fix (student screenshot): without a height cap, an expanded
+           debug panel (20+ lines) is taller than the viewport, so the
+           sticky box just scrolls along as one oversized slab — you end
+           up seeing a random middle slice of it with no visible top/bottom
+           panel edges, disconnected from mainColumn beside it. Capping the
+           height and scrolling internally keeps it a proper self-contained
+           sidebar box at all times, same as any normal dashboard sidebar. */
+        max-height: calc(100vh - 48px);
+        overflow-y: auto;
+      }
     }
 
     /* Phase 10c: brand header now uses the actual logo asset (mumblew_logo.png,
@@ -392,9 +455,108 @@
         animation: borderShimmer 6s linear infinite;
       }
     }
+    /* --- Entry 51: shared coach-mark tour engine ------------------------
+       One generic overlay reused for both the main app tour and the
+       calibration intro — see main.js's startTour()/renderTourStep(). The
+       "highlight" element uses the standard huge-box-shadow spotlight
+       trick (a transparent box whose shadow covers the whole viewport)
+       rather than a clip-path cutout, since it degrades more predictably
+       across browsers/mobile and needs no SVG. */
+    #tourOverlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 100000;
+    }
+    #tourHighlight {
+      display: none;
+      position: fixed;
+      border-radius: 10px;
+      box-shadow: 0 0 0 9999px rgba(6, 12, 11, 0.78);
+      border: 2px solid var(--accent-teal);
+      transition: left 220ms ease, top 220ms ease, width 220ms ease, height 220ms ease;
+      pointer-events: none;
+    }
+    /* Full-dark backdrop for target-less info slides (no highlight box to
+       carry the dimming, so the overlay itself needs a background here). */
+    #tourOverlay.tour-centered #tourHighlight { display: none !important; }
+    #tourOverlay.tour-centered { background: rgba(6, 12, 11, 0.82); }
+    #tourTooltip {
+      position: fixed;
+      width: 280px;
+      max-width: calc(100vw - 24px);
+      background: var(--surface-raised);
+      border: 1px solid var(--border-strong);
+      border-left: 3px solid var(--accent-teal);
+      border-radius: var(--radius);
+      padding: 14px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    #tourStepCounter {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 4px;
+    }
+    #tourTitle { font-weight: 700; margin-bottom: 6px; color: var(--text-primary); }
+    #tourBody { color: var(--text-secondary); }
+    #tourButtons {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 12px;
+      gap: 8px;
+    }
+    #tourButtons .tour-nav { display: flex; gap: 8px; }
+    #tourSkipBtn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 13px;
+      padding: 4px 2px;
+    }
+    #tourSkipBtn:hover { color: var(--text-secondary); border-color: transparent; }
+    #tourNextBtn:hover:not(:disabled) { border-color: var(--accent-teal); }
+
+    #helpTourBtn { border-color: var(--border-strong); }
+
+    /* Entry 51: standalone mobile-viewport notice — deliberately NOT part
+       of the tour system. It needs to be seen immediately, before anyone
+       invests time in a coach-mark walkthrough, and the tour's own
+       element-highlighting approach would look broken on a layout this
+       narrow anyway. Same honest-heads-up spirit as the warning box:
+       dismissible for this pageview, but never permanently silenced —
+       reappears on the next visit since it's safety info, not a one-time tip. */
+    #mobileNoticeBanner {
+      display: none;
+      background: var(--surface-danger);
+      border: 1px solid var(--text-danger);
+      border-radius: var(--radius);
+      padding: 10px 12px;
+      font-size: 13px;
+      line-height: 1.4;
+      margin-bottom: 12px;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    #mobileNoticeBanner.mobile-notice-visible { display: flex; }
+    #mobileNoticeDismissBtn {
+      flex-shrink: 0;
+      font-size: 12px;
+      padding: 4px 8px;
+    }
   </style>
 </head>
 <body>
+  <div id="mobileNoticeBanner">
+    <span>📱 Heads up — Mumblew works best on a laptop or desktop browser right now. Mobile support is still being finished, so tracking may be unreliable here. For the best experience, switch to a computer.</span>
+    <button id="mobileNoticeDismissBtn" type="button">Got it</button>
+  </div>
+  <div id="appLayout">
+  <div id="mainColumn">
   <div class="brand">
     <img src="mumblew_logo.png" alt="Mumblew — silent read-along" style="height: 96px; width: auto; display: block;">
   </div>
@@ -414,6 +576,7 @@
   <div id="controls" style="margin-top: 12px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
     <button id="startBtn" disabled>Start Reading</button>
     <button id="calibrateBtn">Calibrate</button>
+    <button id="helpTourBtn" type="button" title="Show the app guide again">❓ Guide</button>
     <label style="display: flex; align-items: center; gap: 6px;">
       <input type="checkbox" id="toneToggle">
       Emotional tone (experimental)
@@ -426,7 +589,11 @@
     </label>
   </div>
 
-  <div id="calibrationPanel" class="panel" style="display:none; margin-top: 10px; max-width: 640px;">
+  <div id="calibrationPanel" class="panel" style="display:none; margin-top: 10px;">
+    <button id="calibrationIntroReplayBtn" type="button"
+      style="font-size: 12px; padding: 3px 8px; background: transparent; color: var(--text-muted); border-color: var(--border); margin-bottom: 8px;">
+      ❓ Show intro again
+    </button>
     <div id="calibrationStep" style="font-weight: 600;"></div>
     <div id="calibrationInstruction" style="margin-top: 6px; color: var(--text-secondary);"></div>
     <div id="calibrationCountdown" style="margin-top: 6px; font-family: monospace;"></div>
@@ -457,10 +624,10 @@
        box, then click "Load Text" either way. Keeping one load action for
        both paths avoids two divergent code paths and lets the student
        review/edit an uploaded file's text before committing it. -->
-  <div id="textInputPanel" class="panel" style="margin-top: 10px; max-width: 640px;">
+  <div id="textInputPanel" class="panel" style="margin-top: 10px;">
     <div style="font-weight: 600;">Reading text</div>
-    <textarea id="textInputArea" rows="6"
-      style="width: 100%; margin-top: 6px; font-size: 14px;"
+    <textarea id="textInputArea" rows="4"
+      style="width: 100%; margin-top: 6px; font-size: 14px; resize: none; overflow-y: hidden;"
       placeholder="Type or paste text here to test the app, or upload a .txt or .pdf file below..."></textarea>
     <div style="margin-top: 6px; display: flex; align-items: center; gap: 8px;">
       <input type="file" id="txtFileInput" accept=".txt,.pdf">
@@ -487,36 +654,67 @@
     </div>
     <div id="readingText"></div>
   </div>
+  </div>
 
-  <details id="debugPanel" class="panel" style="margin-top: 10px; max-width: 640px;">
-    <summary>Debug panel</summary>
-    <div class="debug-body" style="font-family: monospace; font-size: 14px; color: var(--text-secondary);">
-      <div>MAR: <span id="marValue">-</span></div>
-      <div>Mouth state: <span id="mouthState">-</span></div>
-      <div>Speech state: <span id="speechState">-</span></div>
-      <div>Face detection: <span id="facingState">face detected</span></div>
-      <div>Manual switch: <span id="switchDebugValue">on</span></div>
-      <div>Warning box reason: <span id="warningDebugValue">none</span></div>
-      <div>Movement range: <span id="movementRangeValue">-</span></div>
-      <div>Cadence (elapsed/expected): <span id="cadenceValue">-</span></div>
-      <div>Calibration: <span id="calibrationStatusValue">using default thresholds</span></div>
-      <div>Speed calibration: <span id="speedCalibrationValue">using default pacing (calibrate to personalize)</span></div>
-      <div>Tone: <span id="toneValue">off</span></div>
-      <div>Voice: <span id="voiceValue">browser default</span></div>
-      <div>Trouble score: <span id="troubleValue">0.00</span></div>
-      <div>Word boundary events (this utterance): <span id="boundaryCountValue">0</span></div>
-      <div>Last onboundary: <span id="lastBoundaryAgoValue">-</span>ms ago</div>
-      <div>Speed fit (raw): <span id="rateFitDebugValue">-</span></div>
-      <div>Detection gap (last close): <span id="detectionGapValue">-</span></div>
-      <div>Cancel-to-actual-stop gap (last close): <span id="cancelStopGapValue">-</span></div>
-      <div>Last word / gap since prev boundary: <span id="lastWordTextValue">-</span> / <span id="lastWordGapValue">-</span> (prev word expected <span id="lastWordExpectedValue">-</span>)</div>
-      <div>Duplicate boundary events (this utterance): <span id="duplicateBoundaryValue">0</span></div>
-      <div>Early-close detections (this utterance): <span id="earlyCloseValue">0</span></div>
-      <div>Last close: in risky window: <span id="lastCloseInRiskyWindowValue">-</span> (nearest risky delta: <span id="lastCloseRiskyDeltaValue">-</span>)</div>
-      <div>speak() calls this browser session (not per-utterance): <span id="sessionSpeakCountValue">0</span></div>
-      <div>TTS iframe recycles this session (Phase 9a-iframe experiment): <span id="ttsRecycleCountValue">0</span></div>
+  <div id="sideColumn">
+    <div class="side-column-label">Developer tools</div>
+    <details id="debugPanel" class="panel">
+      <summary>Debug panel</summary>
+      <div class="debug-body" style="font-family: monospace; font-size: 14px; color: var(--text-secondary);">
+        <div>MAR: <span id="marValue">-</span></div>
+        <div>Mouth state: <span id="mouthState">-</span></div>
+        <div>Speech state: <span id="speechState">-</span></div>
+        <div>Face detection: <span id="facingState">face detected</span></div>
+        <div>Brightness (0-255, higher = brighter): <span id="brightnessValue">-</span> — <span id="lowLightDebugValue">ok</span></div>
+        <div>Light calibration baseline: <span id="lightBaselineValue">using default fallback (calibrate to personalize)</span></div>
+        <div>Manual switch: <span id="switchDebugValue">on</span></div>
+        <div>Warning box reason: <span id="warningDebugValue">none</span></div>
+        <div>Movement range: <span id="movementRangeValue">-</span></div>
+        <div>Cadence (elapsed/expected): <span id="cadenceValue">-</span></div>
+        <div>Calibration: <span id="calibrationStatusValue">using default thresholds</span></div>
+        <div>Speed calibration: <span id="speedCalibrationValue">using default pacing (calibrate to personalize)</span></div>
+        <div>Tone: <span id="toneValue">off</span></div>
+        <div>Voice: <span id="voiceValue">browser default</span></div>
+        <div>Trouble score: <span id="troubleValue">0.00</span></div>
+        <div>Word boundary events (this utterance): <span id="boundaryCountValue">0</span></div>
+        <div>Last onboundary: <span id="lastBoundaryAgoValue">-</span>ms ago</div>
+        <div>Fallback highlight advances (this utterance, no real onboundary): <span id="fallbackAdvanceCountValue">0</span></div>
+        <div>Fallback rate factor (measured, self-calibrating): <span id="fallbackRateFactorValue">1.000</span></div>
+        <div style="margin-top: 4px;">
+          <label style="display: flex; align-items: center; gap: 6px; font-size: 14px;">
+            <input type="checkbox" id="debugSimulateNoBoundary">
+            Simulate mobile (ignore real onboundary events) — desktop test toggle
+          </label>
+        </div>
+        <div>Speed fit (raw): <span id="rateFitDebugValue">-</span></div>
+        <div>Detection gap (last close): <span id="detectionGapValue">-</span></div>
+        <div>Cancel-to-actual-stop gap (last close): <span id="cancelStopGapValue">-</span></div>
+        <div>Last word / gap since prev boundary: <span id="lastWordTextValue">-</span> / <span id="lastWordGapValue">-</span> (prev word expected <span id="lastWordExpectedValue">-</span>)</div>
+        <div>Duplicate boundary events (this utterance): <span id="duplicateBoundaryValue">0</span></div>
+        <div>Early-close detections (this utterance): <span id="earlyCloseValue">0</span></div>
+        <div>Last close: in risky window: <span id="lastCloseInRiskyWindowValue">-</span> (nearest risky delta: <span id="lastCloseRiskyDeltaValue">-</span>)</div>
+        <div>speak() calls this browser session (not per-utterance): <span id="sessionSpeakCountValue">0</span></div>
+        <div>TTS iframe recycles this session (Phase 9a-iframe experiment): <span id="ttsRecycleCountValue">0</span></div>
+      </div>
+    </details>
+  </div>
+  </div>
+
+  <div id="tourOverlay">
+    <div id="tourHighlight"></div>
+    <div id="tourTooltip">
+      <div id="tourStepCounter"></div>
+      <div id="tourTitle"></div>
+      <div id="tourBody"></div>
+      <div id="tourButtons">
+        <button id="tourSkipBtn" type="button">Skip</button>
+        <div class="tour-nav">
+          <button id="tourBackBtn" type="button" style="display:none;">Back</button>
+          <button id="tourNextBtn" type="button">Next</button>
+        </div>
+      </div>
     </div>
-  </details>
+  </div>
 
   <script type="module" src="main.js"></script>
 

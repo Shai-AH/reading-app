@@ -395,6 +395,37 @@ function estimateWordDuration(word) {
   return BASE_WORD_MS + estimateSyllables(word) * MS_PER_SYLLABLE;
 }
 
+// --- Fallback-advance timing (see scheduleFallbackAdvance) -----------------
+// Layered ON TOP of estimateWordDuration() rather than changing it directly —
+// that formula was hand-tuned against real mouth-mimicry data (Entry 47) for
+// mouth-close cadence gating, and touching it there risks de-tuning those
+// anchor values for a problem that's actually specific to fallback-highlight
+// scheduling. Entry 47 already flagged, but deliberately deferred, exactly
+// the two biases that matter here:
+//   - sentence-final words (before . ! ?) are UNDER-estimated, since real
+//     TTS engines pause for punctuation and the per-syllable formula has no
+//     concept of that. On desktop (where onboundary DOES fire, just slightly
+//     late across a punctuation pause), this let the fallback timer fire
+//     BEFORE the real, delayed event arrived — the two-word forward/back
+//     flicker seen around commas/periods in live testing.
+//   - short function words ("a", "to", "is") are OVER-estimated, which made
+//     the fallback wait longer than the word actually took, compounding
+//     into a highlighter that visibly lagged behind real TTS output over a
+//     paragraph (also seen in live testing, with Simulate-mobile on).
+// These constants are the same kind of starting-guess this project always
+// ships first and tunes from real data later (see MS_PER_SYLLABLE's own
+// history) — not claimed to be precise, just a meaningfully better default
+// than ignoring punctuation/short-words entirely.
+function estimateFallbackDelayMs(word) {
+  const base = estimateWordDuration(word);
+  const lettersOnly = word.replace(/[^a-zA-Z']/g, '');
+  let adjusted = base;
+  if (/[.!?]["')]?$/.test(word)) adjusted += 350;      // sentence-final pause
+  else if (/[,;:]["')]?$/.test(word)) adjusted += 150; // comma-ish pause
+  if (lettersOnly.length > 0 && lettersOnly.length <= 2) adjusted *= 0.7; // counter short-word over-estimate
+  return adjusted * fallbackRateFactor; // measured correction — see fallbackRateFactor above
+}
+
 // --- Phase 11: sample sentence for the Speed calibration step ---
 // Deliberately spans a range of syllable counts (per this file's own
 // estimateSyllables — used elsewhere for real reading text; this sentence
@@ -684,6 +715,19 @@ const txtFileInputEl = document.getElementById('txtFileInput');
 const loadTextBtnEl = document.getElementById('loadTextBtn');
 const textLoadStatusEl = document.getElementById('textLoadStatus');
 
+// Entry 52: auto-grow the textarea to fit its actual content, rather than
+// relying on a fixed rows="N". A fixed row count looked reasonably full at
+// the old ~640px panel width, but the same text wraps into fewer lines at
+// the wider column introduced by the layout restructure, leaving a large
+// empty gap below it (student screenshot) — sizing to content avoids
+// depending on any particular column width at all. Called after every
+// place the textarea's value is set programmatically, plus on manual input.
+function resizeTextareaToFit(el) {
+  el.style.height = 'auto';
+  const minHeight = 90; // ~4 lines at this font-size — floor for empty/short text
+  el.style.height = `${Math.max(el.scrollHeight, minHeight)}px`;
+}
+
 let readingActive = false;      // true from Start Reading click until the whole text finishes
 let isSpeakingChunk = false;    // true while a (possibly multi-word) utterance is actively speaking
 let manualCancel = false;       // true right before we intentionally cancel() due to mouth closing
@@ -864,6 +908,137 @@ let currentSpokenWordExpectedMs = 0; // expected duration for the word currently
 // speakFrom). Empty array = no risky sound detected, use fast/loose gating
 // for the whole word.
 let currentWordRiskyTimings = [];
+
+// --- Mobile highlighter-freeze fix (see PROGRESS.md) -----------------------
+// Isolated diagnostic (harness test, real mobile device): speechSynthesis's
+// `onboundary` event fired 0/14 times for a plain local-voice utterance in
+// the main window, with NO iframe involved — so this is not the Phase 9a
+// iframe-recycling mechanism, it's the platform's onboundary support itself.
+// Since highlightWordAt()/lastBoundaryOffset (both the visible highlight AND
+// the mouth-close resume point) were previously updated ONLY inside
+// onboundary, a browser that never fires it left the highlight frozen and
+// resumed reading from a stale word every time — exactly the reported bug.
+//
+// Fix: a per-word fallback timer, seeded from the same estimateWordDuration()
+// used for mouth-close cadence gating (Fix 3c/3c-2), advances the highlight/
+// resume point on a timer if a real onboundary event doesn't arrive for the
+// current word in time. A real onboundary, if one does land, always wins —
+// it clears and reschedules the fallback from the TRUE position (see its
+// handler in speakFrom) — so on a browser where onboundary already fires
+// reliably (Entry 44 confirmed this for local voices on desktop), this timer
+// is continuously preempted before it ever fires and has no effect at all.
+// No platform/browser detection needed; it's self-correcting either way.
+let fallbackAdvanceTimerId = null;
+let fallbackAdvanceCount = 0; // diagnostic: how many words this utterance advanced via the timer, not a real event
+const fallbackAdvanceCountValueEl = document.getElementById('fallbackAdvanceCountValue');
+// Desktop test toggle (debug panel): forces onboundary events to be ignored,
+// so the fallback-only path can be exercised and watched end-to-end on a
+// normal desktop session — confirms the mechanism itself before relying on
+// a slow mobile deploy-and-retest cycle. Real onboundary events are still
+// received (nothing about actual speech changes), just not acted on.
+let DEBUG_SIMULATE_NO_ONBOUNDARY = false;
+const debugSimulateNoBoundaryEl = document.getElementById('debugSimulateNoBoundary');
+if (debugSimulateNoBoundaryEl) {
+  debugSimulateNoBoundaryEl.addEventListener('change', () => {
+    DEBUG_SIMULATE_NO_ONBOUNDARY = debugSimulateNoBoundaryEl.checked;
+  });
+}
+
+// --- Self-calibrating fallback rate factor ----------------------------------
+// Answers the "stop guessing constants" ask directly: rather than a fixed
+// multiplier, this is MEASURED from real data every time an utterance
+// completes naturally (reaches the actual end of currentText without being
+// cancelled by a mouth close) — the one moment a real elapsed-time ground
+// truth exists even on a browser with zero onboundary events. We already
+// know, for that utterance: exactly how long it really took (performance.now()
+// deltas) and exactly what estimateWordDuration() predicted it would take
+// (the same tuned Entry-47 formula, summed over its words) — the ratio of
+// the two is a genuine measurement of how wrong the baseline estimate is on
+// THIS device/voice/rate, not a hand-picked value. Smoothed with an EMA so
+// one unusual utterance can't swing it wildly, and persisted to localStorage
+// so it keeps improving across sessions instead of resetting every reload.
+const FALLBACK_RATE_STORAGE_KEY = 'readingAppFallbackRateFactor';
+const FALLBACK_RATE_EMA_ALPHA = 0.3;
+let fallbackRateFactor = 1.0;
+try {
+  const savedFactor = parseFloat(localStorage.getItem(FALLBACK_RATE_STORAGE_KEY));
+  // Sanity clamp: guard against a corrupted value or a wildly unrepresentative
+  // early sample (e.g. a one-word utterance) ever making the factor unusable.
+  if (!isNaN(savedFactor) && savedFactor >= 0.3 && savedFactor <= 3) {
+    fallbackRateFactor = savedFactor;
+  }
+} catch (err) { /* localStorage unavailable — keep the 1.0 default */ }
+const fallbackRateFactorValueEl = document.getElementById('fallbackRateFactorValue');
+if (fallbackRateFactorValueEl) fallbackRateFactorValueEl.textContent = fallbackRateFactor.toFixed(3);
+
+// Called from handleStop only on a NATURAL completion (see speakFrom) —
+// updates fallbackRateFactor from this utterance's real-vs-predicted ratio.
+function recordFallbackCalibrationSample(realElapsedMs, wordStartIdx) {
+  if (wordStartIdx === -1 || wordStartIdx >= wordSpans.length) return;
+  let predictedMs = 0;
+  for (let i = wordStartIdx; i < wordSpans.length; i++) {
+    predictedMs += estimateWordDuration(wordSpans[i].span.textContent);
+  }
+  if (predictedMs <= 0 || realElapsedMs <= 0) return;
+  const observedRatio = realElapsedMs / predictedMs;
+  if (observedRatio < 0.3 || observedRatio > 3) {
+    console.log(`[fallback-calibration] discarded outlier sample: ratio ${observedRatio.toFixed(2)} (${Math.round(realElapsedMs)}ms real vs ${Math.round(predictedMs)}ms predicted)`);
+    return;
+  }
+  fallbackRateFactor = fallbackRateFactor * (1 - FALLBACK_RATE_EMA_ALPHA) + observedRatio * FALLBACK_RATE_EMA_ALPHA;
+  if (fallbackRateFactorValueEl) fallbackRateFactorValueEl.textContent = fallbackRateFactor.toFixed(3);
+  try { localStorage.setItem(FALLBACK_RATE_STORAGE_KEY, String(fallbackRateFactor)); } catch (err) { /* ignore */ }
+  console.log(`[fallback-calibration] natural completion: ${Math.round(realElapsedMs)}ms real vs ${Math.round(predictedMs)}ms predicted (ratio ${observedRatio.toFixed(2)}) — fallbackRateFactor now ${fallbackRateFactor.toFixed(3)}`);
+}
+
+// Clears any pending fallback-advance timer. Called whenever something else
+// is about to take over the highlight/resume position: a real onboundary
+// event, a manual cancel (mouth close / word click / hard reset), or the
+// utterance finishing.
+function clearFallbackAdvance() {
+  if (fallbackAdvanceTimerId !== null) {
+    clearTimeout(fallbackAdvanceTimerId);
+    fallbackAdvanceTimerId = null;
+  }
+}
+
+// Schedules a timer to advance the highlight/resume point to the word AFTER
+// `forWordIndex`, using estimateFallbackDelayMs() for that word, in case no
+// real onboundary event arrives for it in time. Guarded on the same
+// `generation` pattern speakFrom's handleStop already uses (myGeneration vs
+// speakGeneration), plus isSpeakingChunk and an activeWordIndex check, so a
+// stale timer from a cancelled/superseded utterance can never fire late and
+// silently move the highlight/resume point out from under a click or a
+// mouth-close that happened in between.
+function scheduleFallbackAdvance(forWordIndex, generation) {
+  clearFallbackAdvance();
+  if (forWordIndex === -1 || forWordIndex + 1 >= wordSpans.length) return; // no next word to fall forward to
+  const wordText = wordSpans[forWordIndex].span.textContent;
+  let delayMs = estimateFallbackDelayMs(wordText);
+  // Confidence guard: if real onboundary events HAVE landed already this
+  // utterance, trust that this browser fires them and give the fallback a
+  // generous safety margin so it only steps in when a real event is
+  // genuinely overdue — not just running a little behind our estimate
+  // (e.g. a punctuation pause). If we've seen ZERO real events so far this
+  // utterance, treat that as evidence this browser may not fire them at all
+  // (confirmed on mobile — harness test: 0/14) and stay close to the raw
+  // estimate instead, so the highlighter doesn't lag noticeably behind.
+  if (boundaryEventCount > 0) delayMs *= 2.2;
+  delayMs = Math.max(60, delayMs); // small floor so a near-zero estimate can't fire instantly
+  fallbackAdvanceTimerId = setTimeout(() => {
+    fallbackAdvanceTimerId = null;
+    if (generation !== speakGeneration) return; // this utterance was superseded/cancelled — stale timer
+    if (!isSpeakingChunk) return; // speech already stopped — don't advance past where it actually stopped
+    if (activeWordIndex !== forWordIndex) return; // a real boundary (or another fallback tick) already moved us on
+    const nextIdx = forWordIndex + 1;
+    fallbackAdvanceCount += 1;
+    if (fallbackAdvanceCountValueEl) fallbackAdvanceCountValueEl.textContent = String(fallbackAdvanceCount);
+    console.log(`[fallback-highlight] no onboundary for "${wordSpans[forWordIndex].span.textContent}" within ${Math.round(delayMs)}ms — advancing on estimate instead`);
+    lastBoundaryOffset = wordSpans[nextIdx].start - baseOffset;
+    highlightWordAt(baseOffset + lastBoundaryOffset);
+    scheduleFallbackAdvance(nextIdx, generation); // keep the chain going for the word after this one
+  }, delayMs);
+}
 
 // Fix 3c: syllable/consonant-risk-aware gating (replaces Fix 3b's flat
 // grace-window test, skipped before live testing — see the note near
@@ -1404,7 +1579,14 @@ function updateCalibration(mar) {
   }
 
   // phase === 'sampling'
-  calibration.currentSamples.push({ mar });
+  // Entry 50: also record the live brightness reading alongside each MAR
+  // sample. Costs nothing extra — sampleBrightness() already runs on its
+  // own interval and currentBrightness is just read here, not recomputed.
+  // Only the 'neutral' step's samples actually get used (see
+  // finishCalibration()) — this step is the natural "what does normal
+  // reading light look like for this person" moment, since it already asks
+  // them to sit still in their real reading position/lighting.
+  calibration.currentSamples.push({ mar, brightness: currentBrightness });
   const remaining = Math.max(0, step.sampleMs - elapsed);
   calibrationCountdownEl.textContent = `Hold it... ${Math.ceil(remaining / 1000)}`;
 
@@ -1422,6 +1604,21 @@ function updateCalibration(mar) {
 function finishCalibration() {
   const neutralMar = average(calibration.results.neutral.map(s => s.mar));
   const mutterMar = average(calibration.results.mutter.map(s => s.mar));
+
+  // Entry 50: light baseline for the self-calibrating low-light warning —
+  // "what does normal brightness look like for this reader, on this
+  // camera" — from the same neutral-step samples already being collected
+  // above, no separate step needed. Guarded with `|| null` rather than
+  // assuming it's always populated: brightness sampling depends on
+  // sampleBrightness() having run at least once (LIGHT_SAMPLE_INTERVAL_MS
+  // after startup), which the neutral step's 1s prep + 3s sample window
+  // comfortably covers in practice, but a defensive fallback costs nothing.
+  const neutralBrightnessSamples = calibration.results.neutral
+    .map(s => s.brightness)
+    .filter(b => typeof b === 'number');
+  const lightBaseline = neutralBrightnessSamples.length > 0
+    ? average(neutralBrightnessSamples)
+    : null;
 
   // Reject a run that couldn't have produced meaningful thresholds, rather
   // than silently saving broken values: mouth didn't move enough between
@@ -1465,6 +1662,7 @@ function finishCalibration() {
     msPerSyllablePersonal,
     baseWordMsPersonal,
     personalizedRate,
+    lightBaseline,
     calibratedAt: new Date().toISOString()
   };
 
@@ -1477,7 +1675,19 @@ function finishCalibration() {
   applyCalibration(data);
 
   calibrationStepEl.textContent = 'Calibration complete';
-  calibrationInstructionEl.textContent = 'Your thresholds have been saved for this device.';
+  // Entry 50 follow-up: doesn't block calibration (the neutral/mutter MAR
+  // gap check above already covers whether mouth-tracking itself worked) —
+  // just an honest heads-up, matching the project's usual "tell them, don't
+  // fail silently" approach. Reuses ABSOLUTE_DARK_EXIT_THRESHOLD as the
+  // reference point rather than inventing a third light constant.
+  const isDimCalibration = typeof lightBaseline === 'number' && lightBaseline < ABSOLUTE_DARK_EXIT_THRESHOLD;
+  if (isDimCalibration) {
+    calibrationInstructionEl.textContent =
+      'Your thresholds have been saved for this device. Heads up: it looks fairly dim right now — ' +
+      'for the most reliable low-light warnings later, consider redoing this step somewhere brighter when you can.';
+  } else {
+    calibrationInstructionEl.textContent = 'Your thresholds have been saved for this device.';
+  }
   calibrationCountdownEl.textContent = '';
   calibration.active = false;
   updateStartButtonState();
@@ -1485,7 +1695,7 @@ function finishCalibration() {
   setTimeout(() => {
     calibrationPanel.style.display = 'none';
     setCalibrationVideoVisible(false);
-  }, 2000);
+  }, isDimCalibration ? 6000 : 2000); // longer hold so the advisory is actually readable
 }
 
 function showCalibrationFailure(message) {
@@ -1532,6 +1742,28 @@ function applyCalibration(data) {
     BASE_WORD_MS = DEFAULT_BASE_WORD_MS;
     PERSONALIZED_RATE = DEFAULT_PERSONALIZED_RATE;
     speedCalibrationValueEl.textContent = 'using default pacing (calibrate to personalize)';
+  }
+
+  // Entry 50: low-light thresholds, relative to this device's own
+  // calibrated baseline rather than a fixed number — see the comment block
+  // above LIGHT_SAMPLE_SIZE for the full reasoning. Same fallback pattern
+  // as the speed block above: no baseline yet (calibration predates this
+  // feature, or the neutral step's brightness samples somehow came back
+  // empty) means keep using the fixed DEFAULT_* values, not `undefined`.
+  const lightBaselineValueEl = document.getElementById('lightBaselineValue');
+  if (typeof data.lightBaseline === 'number' && data.lightBaseline > 0) {
+    LOW_LIGHT_ENTER_THRESHOLD = data.lightBaseline * LOW_LIGHT_ENTER_RATIO;
+    LOW_LIGHT_EXIT_THRESHOLD = data.lightBaseline * LOW_LIGHT_EXIT_RATIO;
+    if (lightBaselineValueEl) {
+      lightBaselineValueEl.textContent =
+        `custom (baseline ${data.lightBaseline.toFixed(1)}, warns below ${LOW_LIGHT_ENTER_THRESHOLD.toFixed(1)})`;
+    }
+  } else {
+    LOW_LIGHT_ENTER_THRESHOLD = DEFAULT_LOW_LIGHT_ENTER_THRESHOLD;
+    LOW_LIGHT_EXIT_THRESHOLD = DEFAULT_LOW_LIGHT_EXIT_THRESHOLD;
+    if (lightBaselineValueEl) {
+      lightBaselineValueEl.textContent = 'using default fallback (calibrate to personalize)';
+    }
   }
 }
 
@@ -1694,6 +1926,7 @@ async function loadSavedText() {
   if (!data || typeof data.text !== 'string' || data.text.trim().length === 0) return;
 
   textInputAreaEl.value = data.text;
+  resizeTextareaToFit(textInputAreaEl);
   const when = new Date(data.savedAt).toLocaleString();
   setCurrentText(data.text, `restored from last session, ${when}`, { persist: false });
 }
@@ -1714,6 +1947,7 @@ loadTextBtnEl.addEventListener('click', () => {
 // about the source.
 textInputAreaEl.addEventListener('input', () => {
   lastLoadedFileName = null;
+  resizeTextareaToFit(textInputAreaEl);
 });
 
 // --- Phase 10d: .pdf upload ---
@@ -1779,6 +2013,7 @@ async function handlePdfFile(file) {
   }
 
   textInputAreaEl.value = text;
+  resizeTextareaToFit(textInputAreaEl);
   lastLoadedFileName = file.name;
   textLoadStatusEl.style.color = '#555';
   textLoadStatusEl.textContent = `"${file.name}" loaded into the box below — click Load Text to use it.`;
@@ -1827,6 +2062,7 @@ txtFileInputEl.addEventListener('change', () => {
       return;
     }
     textInputAreaEl.value = text;
+    resizeTextareaToFit(textInputAreaEl);
     lastLoadedFileName = file.name;
     textLoadStatusEl.style.color = '#555';
     textLoadStatusEl.textContent = `"${file.name}" loaded into the box below — click Load Text to use it.`;
@@ -1842,6 +2078,7 @@ txtFileInputEl.addEventListener('change', () => {
 // disabled until the student actually clicks Load Text (or a saved session
 // is restored, which runs after this and will overwrite it).
 textInputAreaEl.value = SAMPLE_TEXT_FOR_TESTING;
+resizeTextareaToFit(textInputAreaEl);
 
 // --- Phase 4: click-to-word manual resync (State 3) ---
 // Lets the reader jump the reading position directly to any word by clicking it,
@@ -1857,6 +2094,7 @@ function onWordClick(wordIndex) {
   if (isSpeakingChunk) {
     manualCancel = true;
     cancelActiveSpeech();
+    clearFallbackAdvance();
     isSpeakingChunk = false;
   }
 
@@ -2013,7 +2251,8 @@ function updateMouthState(mar) {
     // word in highlightWordAt()/speakFrom() — see its definition), loose
     // everywhere else in the word, including its entire duration if it has
     // no risky sound at all.
-    const dynamicRangeThreshold = isWithinRiskyWindow(elapsedMs, currentWordRiskyTimings)
+    const inRiskyWindowNow = isWithinRiskyWindow(elapsedMs, currentWordRiskyTimings);
+    const dynamicRangeThreshold = inRiskyWindowNow
       ? STOPPED_RANGE_THRESHOLD * CADENCE_UNDER_FACTOR
       : STOPPED_RANGE_THRESHOLD * CADENCE_OVER_FACTOR;
 
@@ -2145,6 +2384,137 @@ function resetSpeechSwitch() {
 
 speechSwitchBtn.addEventListener('click', () => toggleManualSpeechSwitch());
 
+// --- Low-light detection (Entry 50) ---
+// PROGRESS.md Section 3d #1 / Entry 49's root-cause finding: dim ambient
+// light measurably degrades MediaPipe's landmark precision, which is what
+// actually causes the sticky-word bug — not a threshold-tunable bug in
+// isolation. Entry 49's diagnostics (Light Test Helper, closeEventLog) only
+// ever summarize a session AFTER the fact by looking at where closes
+// clustered — useful for confirming the theory, useless as a live signal to
+// warn a reader mid-session. This is a separate, real-time measurement:
+// direct pixel luminance sampled straight from the video feed, independent
+// of MediaPipe/MAR entirely. That independence is deliberate — it measures
+// the actual thing we mean ("is there enough light") rather than inferring
+// it secondhand from a tracking symptom, so it stays honest even if the
+// tracking-precision relationship ever changes.
+//
+// Drawn onto a small offscreen canvas (downsampled to LIGHT_SAMPLE_SIZE x
+// LIGHT_SAMPLE_SIZE) rather than reading the full webcam frame — this makes
+// getImageData cheap regardless of the source camera's real resolution, and
+// keeps this safe to run on mobile too (no per-platform special-casing
+// needed, per the project's cross-device discipline). Sampled on an
+// interval, not every frame — ambient light doesn't change frame-to-frame,
+// so there's no reason to pay the pixel-read cost 60x/sec.
+const LIGHT_SAMPLE_SIZE = 16; // px — small enough getImageData is effectively instant
+const LIGHT_SAMPLE_INTERVAL_MS = 500;
+
+// Threshold approach — Entry 50 follow-up, per PROGRESS.md discussion: a
+// single hardcoded brightness cutoff would NOT be portable across devices.
+// What we sample here isn't raw physical light (lux) — it's pixel
+// brightness AFTER the camera's own auto-exposure/auto-gain has already
+// processed it, and that processing varies a lot by camera/OS/browser. A
+// number tuned against one webcam would be wrong for the next reader's.
+// Instead: capture a per-device BASELINE brightness once, during the
+// existing 'neutral' calibration step (camera already on, user already
+// asked to sit in their normal reading position — zero extra cost), then
+// flag low light as a RELATIVE drop from that baseline rather than an
+// absolute cutoff. Self-calibrating, same category as OPEN_THRESHOLD/
+// CLOSE_THRESHOLD and the speed anchors — see finishCalibration()/
+// applyCalibration() for where the baseline is captured and applied.
+// DEFAULT_*_THRESHOLD below are only a fallback for a reader who hasn't
+// calibrated yet (mirrors how OPEN_THRESHOLD/CLOSE_THRESHOLD themselves
+// have hardcoded defaults until a real calibration overrides them).
+//
+// Hysteresis (enter/exit gap), not a single threshold either way — same
+// pattern as OPEN_THRESHOLD/CLOSE_THRESHOLD for mouth state. A single
+// cutoff would flicker the warning on/off if brightness hovers right at
+// the edge (a lamp flicker, someone shifting in their chair); requiring a
+// real climb back up before clearing avoids that without needing an
+// arbitrary min-display timer like the cadence warning uses.
+const DEFAULT_LOW_LIGHT_ENTER_THRESHOLD = 55; // fallback absolute value, pre-calibration only
+const DEFAULT_LOW_LIGHT_EXIT_THRESHOLD = 70;  // fallback absolute value, pre-calibration only
+// Ratios applied to a calibrated baseline once one exists (see
+// applyCalibration()). Also unvalidated guesses — "dim enough to matter"
+// as a fraction of a personal baseline is still a judgment call, just a
+// more portable one than a raw pixel number. Revisit if real feedback
+// says the warning fires too eagerly or not eagerly enough.
+const LOW_LIGHT_ENTER_RATIO = 0.6; // warn once brightness drops below 60% of baseline
+const LOW_LIGHT_EXIT_RATIO = 0.75; // must climb back above 75% of baseline to clear
+let LOW_LIGHT_ENTER_THRESHOLD = DEFAULT_LOW_LIGHT_ENTER_THRESHOLD;
+let LOW_LIGHT_EXIT_THRESHOLD = DEFAULT_LOW_LIGHT_EXIT_THRESHOLD;
+
+// Absolute floor — a real gap the relative-baseline approach has on its
+// own, flagged by the student: if someone calibrates IN a dim room, their
+// baseline is already dim, so a further 40% drop from an already-low
+// number rarely happens even when the room is genuinely too dark to read
+// by. This floor fires independent of any baseline at all, as a backstop.
+// It's deliberately set low on the 0-255 scale specifically because that's
+// the one part of the brightness scale where camera auto-exposure/auto-gain
+// differences across devices matter least — every camera's compensation
+// eventually hits its own noise floor, so a genuinely dim room reads low
+// pretty much everywhere. This does NOT replace the calibrated relative
+// check above; the two run together (see sampleBrightness()) — relative
+// catches "dimmer than what's normal for you," absolute catches "dim
+// enough that no one's baseline should matter."
+//
+// Values below are DATA-TUNED (student's own real test, not the original
+// guess): normal room ~118-120, a "borderline dim, between normal and
+// dark" room measured ~40 and was correctly felt to be too dim but the
+// original 25/35 pair missed it entirely, a darker room measured ~27-30,
+// full darkness ~20. Raised from the original 25/35 guess to 40/52 so the
+// borderline-dim case is actually caught.
+const ABSOLUTE_DARK_ENTER_THRESHOLD = 40;
+const ABSOLUTE_DARK_EXIT_THRESHOLD = 52;
+
+const lightSampleCanvas = document.createElement('canvas');
+lightSampleCanvas.width = LIGHT_SAMPLE_SIZE;
+lightSampleCanvas.height = LIGHT_SAMPLE_SIZE;
+const lightSampleCtx = lightSampleCanvas.getContext('2d', { willReadFrequently: true });
+
+let lastLightSampleTime = 0;
+// Optimistic default (bright) until the first real sample comes in, so a
+// webcam that hasn't produced a frame yet can't flag a false low-light
+// warning before startup.
+let currentBrightness = 255;
+let isLowLight = false;
+const brightnessValueEl = document.getElementById('brightnessValue');
+const lowLightDebugValueEl = document.getElementById('lowLightDebugValue');
+
+function sampleBrightness() {
+  if (!video.videoWidth || !video.videoHeight) return; // no frame yet
+  lightSampleCtx.drawImage(video, 0, 0, LIGHT_SAMPLE_SIZE, LIGHT_SAMPLE_SIZE);
+  const { data } = lightSampleCtx.getImageData(0, 0, LIGHT_SAMPLE_SIZE, LIGHT_SAMPLE_SIZE);
+  let sum = 0;
+  const pixelCount = data.length / 4;
+  for (let i = 0; i < data.length; i += 4) {
+    // Standard perceptual luminance weighting (Rec. 601) rather than a flat
+    // RGB average — green contributes far more to perceived brightness than
+    // blue, and a flat average under/over-weights depending on the room's
+    // color temperature.
+    sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  }
+  currentBrightness = sum / pixelCount;
+
+  // Hybrid check: warn if EITHER the relative-to-baseline signal or the
+  // absolute-darkness floor says it's too dark; only clear once BOTH have
+  // resolved. This is what actually fixes the "calibrated in a dim room"
+  // gap — the relative check alone could stay permanently insensitive if
+  // the baseline itself was dim, but the absolute floor doesn't care what
+  // the baseline was.
+  if (isLowLight) {
+    const relativeCleared = currentBrightness >= LOW_LIGHT_EXIT_THRESHOLD;
+    const absoluteCleared = currentBrightness >= ABSOLUTE_DARK_EXIT_THRESHOLD;
+    if (relativeCleared && absoluteCleared) isLowLight = false;
+  } else {
+    const relativeTripped = currentBrightness < LOW_LIGHT_ENTER_THRESHOLD;
+    const absoluteTripped = currentBrightness < ABSOLUTE_DARK_ENTER_THRESHOLD;
+    if (relativeTripped || absoluteTripped) isLowLight = true;
+  }
+
+  if (brightnessValueEl) brightnessValueEl.textContent = currentBrightness.toFixed(1);
+  if (lowLightDebugValueEl) lowLightDebugValueEl.textContent = isLowLight ? 'low light' : 'ok';
+}
+
 // --- Plain-English trouble explainer (Entry 45+) ---
 // The ambient red border (Phase 11b) signals THAT something's off but not
 // WHAT — this fills that gap without a popup/toast (which would interrupt
@@ -2155,6 +2525,7 @@ speechSwitchBtn.addEventListener('click', () => toggleManualSpeechSwitch());
 const WARNING_MESSAGES = {
   'switch-off': 'Reading is paused — flip the switch (or press Space) to resume.',
   'no-face': "Can't see your face — check your camera or lighting.",
+  'low-light': 'Lighting looks low — more light will help tracking keep up with your mouth.',
   'cadence': 'Taking a while on this word — no rush, just checking in.'
 };
 // Threshold on the ALREADY-smoothed trouble score (slow-accumulate/
@@ -2182,6 +2553,11 @@ function computeWarningReason() {
   if (!readingActive) return null;
   if (!manualSpeechEnabled) return 'switch-off'; // highest priority — always wins
   if (!isFaceVisible) return 'no-face';
+  // Entry 50: ranked ahead of 'cadence' deliberately — Entry 49 found dim
+  // light is often the actual root cause behind a cadence stall (landmark
+  // precision degrading, not the reader genuinely pausing), so naming the
+  // real cause first is more useful than reporting the downstream symptom.
+  if (isLowLight) return 'low-light';
   const now = performance.now();
   if (displayedTroubleScore >= WARNING_BOX_TROUBLE_THRESHOLD) {
     cadenceWarningActiveUntil = now + WARNING_BOX_MIN_DISPLAY_MS;
@@ -2249,6 +2625,7 @@ function onMouthClosed() {
   manualCancel = true;
   cancelRequestedTime = performance.now();
   cancelActiveSpeech();
+  clearFallbackAdvance();
   isSpeakingChunk = false;
   speechStateEl.textContent = 'waiting for mouth to open';
 }
@@ -2270,6 +2647,8 @@ function speakFrom(offset) {
   duplicateBoundaryValueEl.textContent = '0';
   earlyCloseCount = 0;
   earlyCloseValueEl.textContent = '0';
+  fallbackAdvanceCount = 0;
+  if (fallbackAdvanceCountValueEl) fallbackAdvanceCountValueEl.textContent = '0';
 
   // Phase 11b bugfix: prime the per-word cadence clock for the word at the
   // resume point right away, rather than only waiting for onboundary/
@@ -2309,6 +2688,8 @@ function speakFrom(offset) {
     speakingPollIntervalId = null;
   }
   const myGeneration = ++speakGeneration;
+  const utteranceCallTime = performance.now(); // fallback anchor if onstart never fires on this browser
+  let utteranceRealStartTime = null;           // set from onstart when available — the real ground-truth anchor
   const synthRef = ttsEngine.synth; // captured now in case a later recycle swaps ttsEngine.synth mid-flight
   // Bug fix: this is also the ONE place activeSpeechSynth gets updated —
   // every external cancel() call site (onMouthClosed, gate trips, word-click,
@@ -2317,6 +2698,24 @@ function speakFrom(offset) {
   // its declaration for the full "orphaned utterance" bug this fixes.
   activeSpeechSynth = synthRef;
   let stopHandled = false; // local to this call — whichever of onend/poll fires first wins, the other is a no-op
+
+  // Mobile highlighter-freeze fix: don't wait for a first onboundary event
+  // to even show WHERE we're resuming from — confirmed missing ENTIRELY on
+  // some mobile browsers (harness test: 0/14 events, no iframe involved).
+  // If the resume word is already the active one (e.g. a brief mouth close
+  // and reopen mid-word), leave the highlight alone — highlightWordAt's own
+  // duplicate-word guard would no-op this anyway, and the clock was already
+  // re-primed above. Otherwise mark it directly; a real onboundary landing
+  // on this same word afterward is a harmless no-op via that same guard.
+  if (resumeWordIdx !== -1 && resumeWordIdx !== activeWordIndex) {
+    if (activeWordIndex !== -1) {
+      wordSpans[activeWordIndex].span.classList.remove('active');
+    }
+    wordSpans[resumeWordIdx].span.classList.add('active');
+    activeWordIndex = resumeWordIdx;
+    if (autoScrollEnabled) scrollToActiveWord();
+  }
+  scheduleFallbackAdvance(resumeWordIdx, myGeneration);
 
   currentUtterance = new ttsEngine.UtteranceCtor(currentText.slice(offset));
 
@@ -2358,12 +2757,38 @@ function speakFrom(offset) {
 
   currentUtterance.onboundary = (event) => {
     if (event.name !== 'word') return;
+    if (DEBUG_SIMULATE_NO_ONBOUNDARY) return; // debug toggle: pretend this event never arrived
     lastBoundaryOffset = event.charIndex;
     // Phase 9 (diagnostic): record that a real boundary event landed.
     boundaryEventCount += 1;
     lastBoundaryEventTime = performance.now();
     boundaryCountValueEl.textContent = String(boundaryEventCount);
     highlightWordAt(baseOffset + event.charIndex);
+    // Mobile highlighter-freeze fix: a real event always wins — reschedule
+    // the fallback chain from the TRUE position it just gave us, so drift
+    // never compounds past a single word on a browser where onboundary
+    // fires at all (even partially/unreliably, not just the fully-broken case).
+    scheduleFallbackAdvance(activeWordIndex, myGeneration);
+  };
+
+  // Ground-truth anchor for the fallback timer, not a guess: onstart fires
+  // when audio actually begins, which is measurably later than the speak()
+  // call on some devices (voice loading, engine startup). The very first
+  // fallback schedule above was anchored to speak()-call time because
+  // nothing else was available yet at that point — silently eating into
+  // word 1's own budget by however long that startup gap turned out to be
+  // on a given device, which is what caused the first-word-only jitter seen
+  // in live testing (every later word is anchored correctly, by either a
+  // real onboundary or a fallback tick that both fire during actual
+  // playback). Re-anchoring here closes that gap with a real measurement
+  // instead of a bigger guessed buffer. If onstart never fires on some
+  // browser, the original speak()-time-anchored schedule above simply
+  // stands uncorrected — no regression, just no improvement.
+  currentUtterance.onstart = () => {
+    utteranceRealStartTime = performance.now();
+    if (myGeneration === speakGeneration) {
+      scheduleFallbackAdvance(activeWordIndex, myGeneration);
+    }
   };
 
   // Shared by both onend (fallback, effectively never fires — see the
@@ -2399,6 +2824,10 @@ function speakFrom(offset) {
       manualCancel = false;
       return;
     }
+    // Natural completion — the one moment we get real ground truth even on
+    // a browser with zero onboundary events. See recordFallbackCalibrationSample.
+    const realStartTime = utteranceRealStartTime !== null ? utteranceRealStartTime : utteranceCallTime;
+    recordFallbackCalibrationSample(performance.now() - realStartTime, resumeWordIdx);
     finishReading();
   }
 
@@ -2431,6 +2860,7 @@ function speakFrom(offset) {
 function finishReading() {
   readingActive = false;
   isSpeakingChunk = false;
+  clearFallbackAdvance();
   speechStateEl.textContent = 'finished';
   if (activeWordIndex !== -1) {
     wordSpans[activeWordIndex].span.classList.remove('active');
@@ -2456,6 +2886,7 @@ startBtn.addEventListener('click', () => {
   manualCancel = true;
   cancelActiveSpeech();
   ttsEngine.synth.cancel();
+  clearFallbackAdvance();
   isSpeakingChunk = false;
   readingActive = false;
 
@@ -2589,6 +3020,17 @@ function predictLoop() {
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
 
+  // Entry 50: independent of face detection below — brightness only needs
+  // a video frame, not a detected face, so a dark room with no face found
+  // still gets sampled (arguably the exact case where the reading is most
+  // relevant). Interval-gated, not every frame — see comment at
+  // sampleBrightness().
+  const nowForLightSample = performance.now();
+  if (nowForLightSample - lastLightSampleTime >= LIGHT_SAMPLE_INTERVAL_MS) {
+    lastLightSampleTime = nowForLightSample;
+    sampleBrightness();
+  }
+
   const results = faceLandmarker.detectForVideo(video, performance.now());
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -2677,6 +3119,310 @@ function predictLoop() {
   }
 
   scheduleNextFrame();
+}
+
+// --- Shared coach-mark tour engine (Entry 51) ---------------------------
+// One generic step-based walkthrough, reused for both the main app tour
+// and the calibration intro, per the shared-system decision made with the
+// student rather than building two separate coach-mark implementations.
+// A step is either UI-anchored ({ targetId, title, body } — highlights a
+// real element) or a plain info slide ({ title, body }, no targetId — a
+// centered card with no spotlight, used for welcome/summary slides that
+// aren't "about" any one button).
+//
+// "Seen" state persists per tour id in localStorage (TOUR_STORAGE_PREFIX +
+// id) so a returning user isn't shown the same tour unprompted every
+// visit — but nothing is ever permanently hidden: both tours stay
+// manually re-runnable (helpTourBtn for the main tour; the calibration
+// intro re-runs any time hasSeenTour() is false, and finishing/skipping it
+// always proceeds into the real wizard either way — see onCalibrateClick).
+// Same "always leave a way back" pattern as the warning box elsewhere.
+const TOUR_STORAGE_PREFIX = 'readingAppTourSeen_';
+
+let activeTour = null; // { tourId, steps, index }
+
+const tourOverlayEl = document.getElementById('tourOverlay');
+const tourHighlightEl = document.getElementById('tourHighlight');
+const tourTooltipEl = document.getElementById('tourTooltip');
+const tourStepCounterEl = document.getElementById('tourStepCounter');
+const tourTitleEl = document.getElementById('tourTitle');
+const tourBodyEl = document.getElementById('tourBody');
+const tourBackBtn = document.getElementById('tourBackBtn');
+const tourNextBtn = document.getElementById('tourNextBtn');
+const tourSkipBtn = document.getElementById('tourSkipBtn');
+const helpTourBtn = document.getElementById('helpTourBtn');
+
+function hasSeenTour(tourId) {
+  try {
+    return localStorage.getItem(TOUR_STORAGE_PREFIX + tourId) === '1';
+  } catch (err) {
+    return false; // storage unavailable — treat as "not seen" rather than crash
+  }
+}
+
+function markTourSeen(tourId) {
+  try {
+    localStorage.setItem(TOUR_STORAGE_PREFIX + tourId, '1');
+  } catch (err) {
+    // Non-fatal — worst case the tour just auto-shows again next visit.
+  }
+}
+
+function startTour(tourId, steps) {
+  if (!steps || steps.length === 0) return;
+  activeTour = { tourId, steps, index: 0 };
+  tourOverlayEl.style.display = 'block';
+  window.addEventListener('resize', repositionActiveTourStep);
+  window.addEventListener('scroll', repositionActiveTourStep, true);
+  renderTourStep();
+}
+
+// Returns the id of the tour that just ended, so the caller (see
+// tourNextBtn/tourSkipBtn below) can decide what happens next — e.g. the
+// calibration intro always hands off into the real wizard.
+function endTour() {
+  if (!activeTour) return null;
+  const finishedTourId = activeTour.tourId;
+  markTourSeen(finishedTourId);
+  tourOverlayEl.style.display = 'none';
+  tourOverlayEl.classList.remove('tour-centered');
+  tourHighlightEl.style.display = 'none';
+  window.removeEventListener('resize', repositionActiveTourStep);
+  window.removeEventListener('scroll', repositionActiveTourStep, true);
+  activeTour = null;
+  return finishedTourId;
+}
+
+function renderTourStep() {
+  if (!activeTour) return;
+  const step = activeTour.steps[activeTour.index];
+  tourStepCounterEl.textContent = `${activeTour.index + 1} of ${activeTour.steps.length}`;
+  tourTitleEl.textContent = step.title;
+  tourBodyEl.textContent = step.body;
+  tourBackBtn.style.display = activeTour.index === 0 ? 'none' : 'inline-block';
+  tourNextBtn.textContent = activeTour.index === activeTour.steps.length - 1 ? 'Done' : 'Next';
+
+  const target = step.targetId ? document.getElementById(step.targetId) : null;
+  if (target) {
+    tourOverlayEl.classList.remove('tour-centered');
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // Give the smooth scroll a moment to settle before measuring —
+    // getBoundingClientRect() called immediately after scrollIntoView can
+    // still reflect the pre-scroll position on some browsers.
+    setTimeout(() => positionTourStep(target), 260);
+  } else {
+    // No targetId, or the referenced element genuinely isn't in the DOM
+    // right now (defensive — shouldn't happen with the fixed step lists
+    // below, but a silently-missing highlight is worse than a graceful
+    // fallback to a centered slide).
+    tourOverlayEl.classList.add('tour-centered');
+    tourHighlightEl.style.display = 'none';
+    positionTooltipCentered();
+  }
+}
+
+function positionTourStep(target) {
+  if (!activeTour) return;
+  const rect = target.getBoundingClientRect();
+  const pad = 6;
+  tourHighlightEl.style.display = 'block';
+  tourHighlightEl.style.left = `${rect.left - pad}px`;
+  tourHighlightEl.style.top = `${rect.top - pad}px`;
+  tourHighlightEl.style.width = `${rect.width + pad * 2}px`;
+  tourHighlightEl.style.height = `${rect.height + pad * 2}px`;
+
+  const spaceBelow = window.innerHeight - rect.bottom;
+  const tooltipGoesBelow = spaceBelow > 180 || rect.top < 180;
+  if (tooltipGoesBelow) {
+    tourTooltipEl.style.top = `${rect.bottom + pad + 12}px`;
+    tourTooltipEl.style.transform = 'none';
+  } else {
+    tourTooltipEl.style.top = `${rect.top - pad - 12}px`;
+    tourTooltipEl.style.transform = 'translateY(-100%)';
+  }
+  const maxLeft = Math.max(window.innerWidth - 300, 12);
+  const left = Math.min(Math.max(rect.left, 12), maxLeft);
+  tourTooltipEl.style.left = `${left}px`;
+}
+
+function positionTooltipCentered() {
+  tourTooltipEl.style.top = '50%';
+  tourTooltipEl.style.left = '50%';
+  tourTooltipEl.style.transform = 'translate(-50%, -50%)';
+}
+
+function repositionActiveTourStep() {
+  if (!activeTour) return;
+  const step = activeTour.steps[activeTour.index];
+  const target = step.targetId ? document.getElementById(step.targetId) : null;
+  if (target) positionTourStep(target);
+}
+
+// What happens after a tour ends (finished OR skipped — skipping means
+// "I get it, move on," not "cancel the flow"). Only the calibration intro
+// currently needs a hand-off; the main app tour just ends.
+function onTourFinished(tourId) {
+  if (tourId === 'calibrationIntro') {
+    startCalibration();
+  }
+}
+
+tourNextBtn.addEventListener('click', () => {
+  if (!activeTour) return;
+  if (activeTour.index >= activeTour.steps.length - 1) {
+    onTourFinished(endTour());
+  } else {
+    activeTour.index += 1;
+    renderTourStep();
+  }
+});
+tourBackBtn.addEventListener('click', () => {
+  if (!activeTour || activeTour.index === 0) return;
+  activeTour.index -= 1;
+  renderTourStep();
+});
+tourSkipBtn.addEventListener('click', () => {
+  onTourFinished(endTour());
+});
+
+// --- Main app tour content -------------------------------------------
+// Walks the controls actually present in index.html today. Ordered so the
+// mobile heads-up lands early (step 3) — seen before anyone invests real
+// time in the rest of the walkthrough, per the student's explicit request.
+const MAIN_APP_TOUR_STEPS = [
+  {
+    title: 'Welcome to Mumblew 👋',
+    body: 'Mumblew reads text aloud, paced by your own quiet mouth movement instead of buttons or timers. This quick guide covers the basics — takes about a minute.'
+  },
+  {
+    targetId: 'privacyNote',
+    title: 'Your camera stays private',
+    body: 'Video is processed entirely on your device and is never uploaded, recorded, or sent anywhere.'
+  },
+  {
+    title: 'Best on a laptop or desktop',
+    body: "Mumblew works best on a laptop or desktop browser right now. Mobile support is still being finished, so tracking may be unreliable on a phone — for the best experience, use a computer."
+  },
+  {
+    targetId: 'textInputPanel',
+    title: 'Add something to read',
+    body: 'Paste or type text here, or upload a .txt or .pdf file.'
+  },
+  {
+    targetId: 'calibrateBtn',
+    title: 'Calibrate (one-time setup)',
+    body: 'A quick ~15-second setup that teaches the app your own mouth movements and reading pace. Only needs to be done once per device.'
+  },
+  {
+    targetId: 'startBtn',
+    title: 'Start Reading',
+    body: "Once you've calibrated and loaded some text, tap here. The app reads aloud for as long as your mouth is moving, and pauses when it stops."
+  },
+  {
+    targetId: 'speechSwitchBtn',
+    title: 'Pause / resume anytime',
+    body: 'Click this switch, or just press Spacebar, to pause or resume reading anytime — no need to touch your mouth to do it.'
+  },
+  {
+    targetId: 'readingControls',
+    title: 'Heads-up messages',
+    body: "If something's off — low light, can't see your face, and so on — a plain-English note appears in this corner, so you always know why reading paused."
+  },
+  {
+    targetId: 'readingText',
+    title: 'Jump to any word',
+    body: 'Once text is loaded, tap any word directly to jump the narration straight to it.'
+  }
+];
+
+// --- Calibration intro content ----------------------------------------
+// Shown before the existing 3-step wizard (CALIBRATION_STEPS above) the
+// first time someone clicks Calibrate — see onCalibrateClick(). Deliberately
+// short: this is a preview, not a replacement for the wizard's own
+// per-step instructions.
+const CALIBRATION_INTRO_STEPS = [
+  {
+    title: "Let's set up calibration",
+    body: 'This teaches Mumblew your own mouth movements and reading pace, so tracking fits you specifically. Takes about 15 seconds, and only needs to happen once per device.'
+  },
+  {
+    targetId: 'container',
+    title: "You'll see yourself here",
+    body: "Your camera preview shows up in this box during calibration (and only during calibration) — just to help you frame your face."
+  },
+  {
+    title: 'Three quick steps',
+    body: '1) Relax your mouth naturally. 2) Silently mouth a sample sentence. 3) Pick a comfortable reading pace with a slider. Ready when you are.'
+  }
+];
+
+// Calibrate button now shows the intro tour first time only, then always
+// proceeds into the real wizard either way (see onTourFinished above) —
+// skipping the intro is "I already know this," not "cancel calibration."
+function onCalibrateClick() {
+  if (!hasSeenTour('calibrationIntro')) {
+    startTour('calibrationIntro', CALIBRATION_INTRO_STEPS);
+  } else {
+    startCalibration();
+  }
+}
+calibrateBtn.removeEventListener('click', startCalibration);
+calibrateBtn.addEventListener('click', onCalibrateClick);
+
+if (helpTourBtn) {
+  helpTourBtn.addEventListener('click', () => startTour('mainApp', MAIN_APP_TOUR_STEPS));
+}
+
+// Student-flagged gap: the calibration intro previously had NO way back —
+// it only ever showed automatically, the very first time Calibrate was
+// clicked (hasSeenTour('calibrationIntro') === false), with no button to
+// replay it afterward. This is that button, visible at the top of the
+// calibration panel on every run. Bypasses hasSeenTour() deliberately —
+// this is an explicit "show it to me again" request, not the automatic
+// first-time trigger. Note: since onTourFinished('calibrationIntro') always
+// hands off into startCalibration() (see above), clicking this mid-wizard
+// restarts calibration from step 1 once the intro finishes/is skipped —
+// acceptable given the whole flow is ~15 seconds either way.
+const calibrationIntroReplayBtn = document.getElementById('calibrationIntroReplayBtn');
+if (calibrationIntroReplayBtn) {
+  calibrationIntroReplayBtn.addEventListener('click', () => {
+    startTour('calibrationIntro', CALIBRATION_INTRO_STEPS);
+  });
+}
+
+// --- Mobile-viewport notice (Entry 51) ---------------------------------
+// Deliberately separate from the tour system above: this needs to be seen
+// immediately by anyone on a phone, before they invest time in a
+// coach-mark walkthrough built around desktop-sized elements. Same
+// breakpoint the app's own CSS already treats as "narrow/mobile"
+// (see the existing @media (max-width: 480px) rules).
+const mobileNoticeBannerEl = document.getElementById('mobileNoticeBanner');
+const mobileNoticeDismissBtn = document.getElementById('mobileNoticeDismissBtn');
+// Bug fix (student-reported): the original version only ran the check ONCE
+// at page load, so live window resizing (a desktop user shrinking their
+// browser tab, as opposed to a genuine phone visit) never re-triggered it.
+// Real mobile visits still would have worked (viewport is narrow from the
+// very first paint), but manual/testing resizes wouldn't have — exactly
+// the gap the student caught. Fixed with a resize listener below.
+let mobileNoticeDismissedThisLoad = false;
+function checkMobileNotice() {
+  if (!mobileNoticeBannerEl || mobileNoticeDismissedThisLoad) return;
+  const isNarrowViewport = window.matchMedia('(max-width: 480px)').matches;
+  mobileNoticeBannerEl.classList.toggle('mobile-notice-visible', isNarrowViewport);
+}
+if (mobileNoticeDismissBtn) {
+  mobileNoticeDismissBtn.addEventListener('click', () => {
+    mobileNoticeDismissedThisLoad = true; // don't let the next resize tick immediately re-show it
+    mobileNoticeBannerEl.classList.remove('mobile-notice-visible');
+  });
+}
+checkMobileNotice();
+window.addEventListener('resize', checkMobileNotice);
+
+// Auto-show the main tour once, on first-ever visit — small delay so the
+// page has visibly rendered first rather than popping in over a blank flash.
+if (!hasSeenTour('mainApp')) {
+  setTimeout(() => startTour('mainApp', MAIN_APP_TOUR_STEPS), 600);
 }
 
 setup();
