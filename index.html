@@ -548,6 +548,135 @@
       font-size: 12px;
       padding: 4px 8px;
     }
+
+    /* --- Entry 52: feedback widget -------------------------------------
+       Small floating corner tab, collapsed by default (same "don't crowd
+       the reading experience" reasoning as the debug panel/warning box),
+       fixed position so it's reachable from anywhere on the page including
+       mid-scroll on a long reading. Submissions go straight to Formspree
+       (see main.js submitFeedback()) — no backend of our own. */
+    #feedbackWidget {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      z-index: 500;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 8px;
+    }
+    .feedback-toggle {
+      background: var(--surface-raised);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 10px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.45);
+    }
+    .feedback-toggle:hover { border-color: var(--accent-teal); }
+    .feedback-panel {
+      width: 280px;
+      max-width: calc(100vw - 32px);
+      background: var(--surface-raised);
+      border: 1px solid var(--border-strong);
+      border-left: 3px solid var(--accent-teal);
+      border-radius: var(--radius);
+      padding: 14px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      font-size: 13px;
+    }
+    .feedback-panel[hidden] { display: none; }
+    .feedback-panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .feedback-panel-title { font-weight: 700; color: var(--text-primary); }
+    .feedback-close-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 18px;
+      line-height: 1;
+      padding: 0 2px;
+    }
+    .feedback-close-btn:hover { color: var(--text-secondary); border-color: transparent; }
+    .feedback-stars {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 10px;
+    }
+    .feedback-star {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 24px;
+      line-height: 1;
+      padding: 2px 4px;
+    }
+    .feedback-star:hover { border-color: transparent; color: var(--accent-amber); }
+    .feedback-star.feedback-star-filled { color: var(--accent-amber); }
+    .feedback-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .feedback-tag {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 12px;
+    }
+    .feedback-tag:hover { border-color: var(--accent-teal); }
+    .feedback-tag.feedback-tag-selected {
+      background: var(--accent-teal-dim);
+      border-color: var(--accent-teal);
+      color: #06110D;
+      font-weight: 600;
+    }
+    #feedbackTextArea {
+      width: 100%;
+      font-size: 13px;
+      resize: none;
+      margin-bottom: 8px;
+    }
+    /* Honeypot — invisible to real users (no display:none, so it still
+       reads as "empty" to a screen reader rather than absent; bots
+       following generic form-fill heuristics tend to fill it anyway). */
+    .feedback-honeypot {
+      position: absolute;
+      left: -9999px;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+    }
+    .feedback-actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .feedback-error { color: var(--text-danger); font-size: 12px; }
+    .feedback-submit-btn {
+      background: var(--accent-teal-dim);
+      border-color: var(--accent-teal);
+      color: #06110D;
+      font-weight: 600;
+    }
+    .feedback-submit-btn:hover:not(:disabled) { border-color: var(--accent-teal); }
+    .feedback-thanks {
+      text-align: center;
+      padding: 10px 0;
+      color: var(--text-primary);
+    }
+    @media (max-width: 480px) {
+      #feedbackWidget { right: 10px; bottom: 10px; }
+      .feedback-panel { width: 240px; }
+    }
   </style>
 </head>
 <body>
@@ -712,6 +841,49 @@
           <button id="tourBackBtn" type="button" style="display:none;">Back</button>
           <button id="tourNextBtn" type="button">Next</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Entry 52: feedback widget. Collapsed toggle by default; expands into
+       a short form (star rating + quick tags + optional text). Submits via
+       fetch() straight to Formspree — see submitFeedback() in main.js.
+       Honeypot field (_gotcha) is Formspree's spam-filter convention: real
+       users never see/fill it, most bots do. -->
+  <div id="feedbackWidget">
+    <button id="feedbackToggleBtn" class="feedback-toggle" type="button" aria-expanded="false" aria-controls="feedbackPanel">
+      💬 Feedback
+    </button>
+    <div id="feedbackPanel" class="feedback-panel" hidden>
+      <div class="feedback-panel-header">
+        <span class="feedback-panel-title">How's it going?</span>
+        <button id="feedbackCloseBtn" class="feedback-close-btn" type="button" aria-label="Close feedback">&times;</button>
+      </div>
+      <div id="feedbackFormView">
+        <div id="feedbackStars" class="feedback-stars" role="radiogroup" aria-label="Rating out of 5">
+          <button type="button" class="feedback-star" data-value="1" aria-label="1 star">&#9733;</button>
+          <button type="button" class="feedback-star" data-value="2" aria-label="2 stars">&#9733;</button>
+          <button type="button" class="feedback-star" data-value="3" aria-label="3 stars">&#9733;</button>
+          <button type="button" class="feedback-star" data-value="4" aria-label="4 stars">&#9733;</button>
+          <button type="button" class="feedback-star" data-value="5" aria-label="5 stars">&#9733;</button>
+        </div>
+        <div id="feedbackTags" class="feedback-tags">
+          <button type="button" class="feedback-tag" data-tag="Bug">Bug</button>
+          <button type="button" class="feedback-tag" data-tag="Confusing">Confusing</button>
+          <button type="button" class="feedback-tag" data-tag="Mouth-tracking felt off">Mouth-tracking felt off</button>
+          <button type="button" class="feedback-tag" data-tag="Speed/pacing">Speed/pacing</button>
+          <button type="button" class="feedback-tag" data-tag="Lighting">Lighting</button>
+          <button type="button" class="feedback-tag" data-tag="Something else">Something else</button>
+        </div>
+        <textarea id="feedbackTextArea" rows="3" maxlength="1000" placeholder="Anything else? (optional)"></textarea>
+        <input type="text" id="feedbackHoneypot" name="_gotcha" class="feedback-honeypot" tabindex="-1" autocomplete="off" aria-hidden="true">
+        <div class="feedback-actions">
+          <span id="feedbackErrorMsg" class="feedback-error"></span>
+          <button id="feedbackSubmitBtn" class="feedback-submit-btn" type="button">Send feedback</button>
+        </div>
+      </div>
+      <div id="feedbackThanksView" class="feedback-thanks" hidden>
+        🎉 Thanks — this really helps.
       </div>
     </div>
   </div>
