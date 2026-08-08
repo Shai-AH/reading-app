@@ -846,24 +846,7 @@
   </style>
 </head>
 <body>
-  <script>
-    // Entry 52 (2nd revision): must run synchronously, inline, before any
-    // app markup paints — this is what actually prevents the flash of the
-    // real app UI on a first visit, before main.js (a deferred module
-    // script at the end of <body>) gets a chance to run. Kept deliberately
-    // tiny and dependency-free. Uses the same storage key convention as
-    // hasSeenTour()/markTourSeen() in main.js (TOUR_STORAGE_PREFIX +
-    // 'welcomeGate') so both stay in sync without sharing code.
-    try {
-      if (localStorage.getItem('readingAppTourSeen_welcomeGate') !== '1') {
-        document.body.classList.add('app-gated');
-      }
-    } catch (err) {
-      // Storage unavailable — fail open (show the app normally) rather
-      // than risk permanently hiding it behind a gate that can never
-      // resolve.
-    }
-  </script>
+  <script src="gate-init.js"></script>
   <div id="mobileNoticeBanner">
     <span>📱 Heads up — Mumblew works best on a laptop or desktop browser right now. Mobile support is still being finished, so tracking may be unreliable here. For the best experience, switch to a computer.</span>
     <button id="mobileNoticeDismissBtn" type="button">Got it</button>
