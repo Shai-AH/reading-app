@@ -523,6 +523,118 @@
 
     #helpTourBtn { border-color: var(--border-strong); }
 
+    /* --- Intro sequence (Entry 52) ---------------------------------------
+       Separate from the coach-mark tour engine above on purpose: this is a
+       full-bleed image+audio narrative, not a highlight-a-control walkthrough,
+       so it gets its own lightweight overlay rather than being bent to fit
+       #tourOverlay's targeting/highlight assumptions. Same visual language
+       (dark backdrop, teal accent, --surface-raised panel) and same
+       localStorage "seen" convention as the tour engine for consistency. */
+    #introOverlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 100001; /* above the regular tour overlay */
+      background: #06100e;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    #introOverlay.intro-visible { display: flex; }
+    #introStage {
+      position: relative;
+      width: min(90vw, 900px);
+      aspect-ratio: 1376 / 768;
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: #000;
+      box-shadow: 0 12px 48px rgba(0,0,0,0.6);
+    }
+    #introImg {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      opacity: 0;
+      transition: opacity 480ms ease;
+    }
+    #introImg.intro-img-visible { opacity: 1; }
+    #introLogoOverlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      background: rgba(6, 16, 14, 0);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 900ms ease, background 900ms ease;
+    }
+    #introLogoOverlay.intro-logo-visible {
+      opacity: 1;
+      background: rgba(6, 16, 14, 0.55);
+      pointer-events: auto;
+    }
+    #introLogoOverlay img { height: 72px; width: auto; }
+    #introTagline {
+      color: var(--text-primary, #eaf5f2);
+      font-size: 15px;
+      letter-spacing: 0.02em;
+      text-align: center;
+      max-width: 80%;
+    }
+    #introGetStartedBtn {
+      margin-top: 6px;
+      padding: 10px 22px;
+      font-size: 15px;
+    }
+    #introCaption {
+      width: min(90vw, 900px);
+      margin-top: 14px;
+      min-height: 22px;
+      color: var(--text-secondary, #b9c9c5);
+      font-size: 14px;
+      text-align: center;
+      line-height: 1.4;
+    }
+    #introProgressDots {
+      display: flex;
+      gap: 6px;
+      margin-top: 12px;
+    }
+    .intro-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--border-strong, #33453f);
+      transition: background 200ms ease, transform 200ms ease;
+    }
+    .intro-dot.intro-dot-active {
+      background: var(--accent-teal, #3ad6b0);
+      transform: scale(1.3);
+    }
+    #introSkipBtn {
+      display: none; /* only shown while a sequence is actually running — see startIntroSequence()/endIntroSequence() */
+      position: fixed;
+      top: 18px;
+      right: 20px;
+      z-index: 100002;
+      background: rgba(6, 16, 14, 0.6);
+      border: 1px solid var(--border-strong);
+      color: var(--text-secondary, #b9c9c5);
+      font-size: 13px;
+      padding: 6px 14px;
+      border-radius: var(--radius);
+    }
+    #introSkipBtn:hover { color: var(--text-primary); border-color: var(--accent-teal); }
+    #introReplayBtn { border-color: var(--border-strong); }
+    @media (max-width: 480px) {
+      #introTagline { font-size: 13px; }
+      #introCaption { font-size: 13px; }
+    }
+
     /* Entry 51: standalone mobile-viewport notice — deliberately NOT part
        of the tour system. It needs to be seen immediately, before anyone
        invests time in a coach-mark walkthrough, and the tour's own
@@ -549,7 +661,61 @@
       padding: 4px 8px;
     }
 
-    /* --- Entry 52: feedback widget -------------------------------------
+    /* Entry 52 (2nd revision): full-screen welcome gate + the body-level
+       switch that hides the real app behind it on first visit. */
+    body.app-gated #appLayout,
+    body.app-gated #feedbackWidget,
+    body.app-gated #mobileNoticeBanner {
+      display: none !important;
+    }
+    #welcomeGate {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 100003; /* above everything, including the intro sequence itself */
+      background: #06100e;
+      align-items: center;
+      justify-content: center;
+    }
+    body.app-gated #welcomeGate { display: flex; }
+    #welcomeGateCard {
+      max-width: 420px;
+      width: min(90vw, 420px);
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+      padding: 32px 28px;
+      background: var(--surface-raised);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
+      box-shadow: 0 16px 56px rgba(0,0,0,0.55);
+    }
+    #welcomeGateLogo { height: 64px; width: auto; }
+    #welcomeGateText {
+      color: var(--text-secondary, #b9c9c5);
+      font-size: 14px;
+      line-height: 1.5;
+      margin: 0;
+    }
+    #welcomeGateActions {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      width: 100%;
+    }
+    #welcomeGateWatchBtn { border-color: var(--accent-teal); font-size: 15px; padding: 10px; }
+    #welcomeGateSkipBtn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 13px;
+      padding: 4px;
+    }
+    #welcomeGateSkipBtn:hover { color: var(--text-secondary); }
+
+    /* --- Entry 51: feedback widget -------------------------------------
        Small floating corner tab, collapsed by default (same "don't crowd
        the reading experience" reasoning as the debug panel/warning box),
        fixed position so it's reachable from anywhere on the page including
@@ -680,9 +846,52 @@
   </style>
 </head>
 <body>
+  <script>
+    // Entry 52 (2nd revision): must run synchronously, inline, before any
+    // app markup paints — this is what actually prevents the flash of the
+    // real app UI on a first visit, before main.js (a deferred module
+    // script at the end of <body>) gets a chance to run. Kept deliberately
+    // tiny and dependency-free. Uses the same storage key convention as
+    // hasSeenTour()/markTourSeen() in main.js (TOUR_STORAGE_PREFIX +
+    // 'welcomeGate') so both stay in sync without sharing code.
+    try {
+      if (localStorage.getItem('readingAppTourSeen_welcomeGate') !== '1') {
+        document.body.classList.add('app-gated');
+      }
+    } catch (err) {
+      // Storage unavailable — fail open (show the app normally) rather
+      // than risk permanently hiding it behind a gate that can never
+      // resolve.
+    }
+  </script>
   <div id="mobileNoticeBanner">
     <span>📱 Heads up — Mumblew works best on a laptop or desktop browser right now. Mobile support is still being finished, so tracking may be unreliable here. For the best experience, switch to a computer.</span>
     <button id="mobileNoticeDismissBtn" type="button">Got it</button>
+  </div>
+  <!-- Entry 52: intro invite card. Replaces the old auto-play trigger —
+       never plays anything on its own, only ever on a real click. Shown
+       once per unseen state; dismissing just hides it for this pageview
+       (doesn't mark the intro "seen" — still reachable via ▶ Replay Intro). -->
+  <!-- Entry 52 (2nd revision): full-screen welcome gate. On a genuine
+       first-ever visit, this is the ONLY thing visible — the real app
+       markup below stays in the DOM but is hidden via body.app-gated
+       (see CSS) until the user picks Watch or Skip. This replaces the
+       earlier inline invite-card version: a card floating over the already-
+       rendered app UI meant a new user saw the real interface (and could
+       even have the coach-mark guide fire) before deciding whether to
+       watch the story — confusing, and undermined the point of a first
+       impression. Never shown again after this first resolution — a
+       returning visitor who wants to rewatch uses "▶ Replay Intro" in the
+       main controls instead (inline, doesn't hide the app). -->
+  <div id="welcomeGate">
+    <div id="welcomeGateCard">
+      <img src="mumblew_logo.png" alt="Mumblew" id="welcomeGateLogo">
+      <p id="welcomeGateText">New here? See how Mumblew came to be — about a minute, with sound.</p>
+      <div id="welcomeGateActions">
+        <button id="welcomeGateWatchBtn" type="button">▶ Watch the story</button>
+        <button id="welcomeGateSkipBtn" type="button">Skip to app</button>
+      </div>
+    </div>
   </div>
   <div id="appLayout">
   <div id="mainColumn">
@@ -706,6 +915,7 @@
     <button id="startBtn" disabled>Start Reading</button>
     <button id="calibrateBtn">Calibrate</button>
     <button id="helpTourBtn" type="button" title="Show the app guide again">❓ Guide</button>
+    <button id="introReplayBtn" type="button" title="Watch the intro story again">▶ Replay Intro</button>
     <label style="display: flex; align-items: center; gap: 6px;">
       <input type="checkbox" id="toneToggle">
       Emotional tone (experimental)
@@ -829,6 +1039,23 @@
   </div>
   </div>
 
+  <!-- Entry 52: intro sequence. 8-panel illustrated problem/solution story,
+       auto-plays once on first-ever visit before the main app tour. See
+       INTRO_PANELS + runIntroSequence() in main.js for the playback logic. -->
+  <button id="introSkipBtn" type="button">Skip</button>
+  <div id="introOverlay">
+    <div id="introStage">
+      <img id="introImg" src="" alt="">
+      <div id="introLogoOverlay">
+        <img src="mumblew_logo.png" alt="Mumblew">
+        <p id="introTagline">Reading, the way it should feel.</p>
+        <button id="introGetStartedBtn" type="button">Get Started</button>
+      </div>
+    </div>
+    <div id="introProgressDots"></div>
+    <p id="introCaption"></p>
+  </div>
+
   <div id="tourOverlay">
     <div id="tourHighlight"></div>
     <div id="tourTooltip">
@@ -845,7 +1072,7 @@
     </div>
   </div>
 
-  <!-- Entry 52: feedback widget. Collapsed toggle by default; expands into
+  <!-- Entry 51: feedback widget. Collapsed toggle by default; expands into
        a short form (star rating + quick tags + optional text). Submits via
        fetch() straight to Formspree — see submitFeedback() in main.js.
        Honeypot field (_gotcha) is Formspree's spam-filter convention: real

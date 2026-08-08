@@ -3419,13 +3419,253 @@ if (mobileNoticeDismissBtn) {
 checkMobileNotice();
 window.addEventListener('resize', checkMobileNotice);
 
-// Auto-show the main tour once, on first-ever visit — small delay so the
-// page has visibly rendered first rather than popping in over a blank flash.
-if (!hasSeenTour('mainApp')) {
-  setTimeout(() => startTour('mainApp', MAIN_APP_TOUR_STEPS), 600);
+// Entry 52 (2nd revision): first-visit sequencing is now gate-driven, not
+// an unconditional page-load timer. See the "Welcome gate" block at the
+// end of this file for the actual trigger — on first visit, NOTHING (not
+// the app, not the guide, not the intro) shows until the user resolves the
+// full-screen welcome gate by picking Watch or Skip. A returning visitor
+// (gate already resolved) skips straight past the gate with no delay.
+
+// --- Intro sequence (Entry 52, revised) ----------------------------------
+// 8-panel illustrated problem/solution story. NEVER auto-plays and NEVER
+// autoplays audio — only ever starts from an explicit click, either the
+// first-visit invite card (introInviteCard, below) or the "▶ Replay Intro"
+// button in the main controls. This is a deliberate reversal from the
+// first version of this feature: an unrequested full-screen takeover with
+// sound right at page load broke the app's own hands-free/no-forced-action
+// premise, and did so on the very first thing a new visitor experiences —
+// a bad note to open on for an app that exists partly to serve people who
+// may not be able to click reliably (see PROGRESS.md Section 1, ALS/
+// paralysis audience). Starting only from a real click has a useful side
+// effect too: it sidesteps browser autoplay-audio blocking entirely, since
+// playback always follows a genuine user gesture.
+//
+// Deliberately its own small player rather than a reuse of
+// startTour()/renderTourStep() above — that engine is built around
+// highlighting a DOM control with a text tooltip, and has no notion of a
+// full-bleed image or an attached audio track. Follows the same
+// conventions as the tour engine (hasSeenTour/markTourSeen storage keys,
+// dark overlay + teal accent, always-visible Skip) for consistency.
+//
+// Panel 8 is deliberately silent (no narration-8.mp3 — the story's payoff
+// beat is visual, not spoken) and is the one panel that does NOT
+// auto-advance: it holds on the image, fades in the logo + tagline, and
+// waits for an explicit "Get Started" click — same reasoning as above,
+// applied to how the sequence ends as well as how it begins.
+const INTRO_PANEL_COUNT = 8;
+const INTRO_ASSET_BASE = 'assets/intro/';
+// Panel 8 has no entry here — it's handled as the silent final beat below.
+const INTRO_PANELS = [
+  { image: `${INTRO_ASSET_BASE}panel-1.jpg`, audio: `${INTRO_ASSET_BASE}narration-1.mp3`,
+    caption: 'This is John. Looks like he is trying to read something interesting, but... why does he look so desperate?' },
+  { image: `${INTRO_ASSET_BASE}panel-2.jpg`, audio: `${INTRO_ASSET_BASE}narration-2.mp3`,
+    caption: "But his mind keeps drifting. A sentence in, and he's already somewhere else." },
+  { image: `${INTRO_ASSET_BASE}panel-3.jpg`, audio: `${INTRO_ASSET_BASE}narration-3.mp3`,
+    caption: "He tries to mumble a little louder, but unluckily, that's enough to disturb the people around him." },
+  { image: `${INTRO_ASSET_BASE}panel-4.jpg`, audio: `${INTRO_ASSET_BASE}narration-4.mp3`,
+    caption: 'His sister notices — she has seen this before.' },
+  { image: `${INTRO_ASSET_BASE}panel-5.jpg`, audio: `${INTRO_ASSET_BASE}narration-5.mp3`,
+    caption: "Try this. You don't tap anything — you just read like you normally would, quietly, and it keeps pace with you." },
+  { image: `${INTRO_ASSET_BASE}panel-6.jpg`, audio: `${INTRO_ASSET_BASE}narration-6.mp3`,
+    caption: "Reading life changes for John. For the first time in a while, reading doesn't feel like a fight." },
+  { image: `${INTRO_ASSET_BASE}panel-7.jpg`, audio: `${INTRO_ASSET_BASE}narration-7.mp3`,
+    caption: 'Just your lips. Your device and a pair of headphones. That\u2019s all you need...' },
+];
+const INTRO_FINAL_PANEL_IMAGE = `${INTRO_ASSET_BASE}panel-8.jpg`;
+
+const introOverlayEl = document.getElementById('introOverlay');
+const introImgEl = document.getElementById('introImg');
+const introCaptionEl = document.getElementById('introCaption');
+const introProgressDotsEl = document.getElementById('introProgressDots');
+const introSkipBtn = document.getElementById('introSkipBtn');
+const introReplayBtn = document.getElementById('introReplayBtn');
+const introLogoOverlayEl = document.getElementById('introLogoOverlay');
+const introGetStartedBtn = document.getElementById('introGetStartedBtn');
+
+let introState = null; // { index, audioEl, onComplete, advanceTimerId }
+
+function buildIntroProgressDots() {
+  introProgressDotsEl.textContent = '';
+  const totalDots = INTRO_PANEL_COUNT;
+  for (let i = 0; i < totalDots; i++) {
+    const dot = document.createElement('div');
+    dot.className = 'intro-dot';
+    introProgressDotsEl.appendChild(dot);
+  }
 }
 
-// --- Feedback widget (Entry 52) ----------------------------------------
+function setIntroActiveDot(index) {
+  const dots = introProgressDotsEl.querySelectorAll('.intro-dot');
+  dots.forEach((dot, i) => dot.classList.toggle('intro-dot-active', i === index));
+}
+
+// Preload every panel image up front (they're small post-compression —
+// ~150-250KB each, ~1.6MB total) so later panels don't pop in with a
+// blank/half-loaded frame while the story is mid-flow.
+function preloadIntroImages() {
+  INTRO_PANELS.forEach((panel) => { new Image().src = panel.image; });
+  new Image().src = INTRO_FINAL_PANEL_IMAGE;
+}
+
+function startIntroSequence(onComplete) {
+  introState = { index: 0, audioEl: null, onComplete, advanceTimerId: null };
+  buildIntroProgressDots();
+  preloadIntroImages();
+  introOverlayEl.classList.add('intro-visible');
+  introSkipBtn.style.display = 'block';
+  introLogoOverlayEl.classList.remove('intro-logo-visible');
+  playIntroPanel(0);
+}
+
+function stopIntroAudio() {
+  if (introState && introState.audioEl) {
+    introState.audioEl.pause();
+    introState.audioEl.onended = null;
+    introState.audioEl = null;
+  }
+  if (introState && introState.advanceTimerId) {
+    clearTimeout(introState.advanceTimerId);
+    introState.advanceTimerId = null;
+  }
+}
+
+function playIntroPanel(index) {
+  if (!introState) return;
+  introState.index = index;
+  setIntroActiveDot(index);
+
+  if (index >= INTRO_PANEL_COUNT - 1) {
+    // Final panel (8): silent landing beat — image only, no audio, no
+    // auto-advance. Hold briefly, then fade in the logo + Get Started.
+    introImgEl.classList.remove('intro-img-visible');
+    introImgEl.src = INTRO_FINAL_PANEL_IMAGE;
+    introCaptionEl.textContent = '';
+    introImgEl.onload = () => introImgEl.classList.add('intro-img-visible');
+    introState.advanceTimerId = setTimeout(() => {
+      introLogoOverlayEl.classList.add('intro-logo-visible');
+    }, 1600);
+    return;
+  }
+
+  const panel = INTRO_PANELS[index];
+  introImgEl.classList.remove('intro-img-visible');
+  introImgEl.src = panel.image;
+  introCaptionEl.textContent = panel.caption;
+  introImgEl.onload = () => introImgEl.classList.add('intro-img-visible');
+
+  const audio = new Audio(panel.audio);
+  introState.audioEl = audio;
+  audio.onended = () => {
+    if (!introState) return; // sequence was skipped/ended mid-playback
+    playIntroPanel(index + 1);
+  };
+  // If audio fails to load/play (blocked autoplay policy, missing file,
+  // etc.) don't strand the user on a silent panel forever — fall back to a
+  // fixed hold so the sequence still progresses.
+  audio.onerror = () => {
+    if (!introState) return;
+    introState.advanceTimerId = setTimeout(() => playIntroPanel(index + 1), 4000);
+  };
+  const playPromise = audio.play();
+  if (playPromise && playPromise.catch) {
+    playPromise.catch(() => {
+      if (!introState) return;
+      introState.advanceTimerId = setTimeout(() => playIntroPanel(index + 1), 4000);
+    });
+  }
+}
+
+function endIntroSequence() {
+  if (!introState) return;
+  const onComplete = introState.onComplete;
+  stopIntroAudio();
+  markTourSeen('introSequence');
+  introOverlayEl.classList.remove('intro-visible');
+  introLogoOverlayEl.classList.remove('intro-logo-visible');
+  introSkipBtn.style.display = 'none';
+  introState = null;
+  if (onComplete) onComplete();
+}
+
+introSkipBtn.addEventListener('click', endIntroSequence);
+introGetStartedBtn.addEventListener('click', endIntroSequence);
+
+// "▶ Replay Intro" — explicit re-watch request, always available regardless
+// of hasSeenTour('introSequence'). No onComplete chain here: replaying
+// doesn't need to also re-trigger the main app tour afterward.
+if (introReplayBtn) {
+  introReplayBtn.addEventListener('click', () => {
+    startIntroSequence(null);
+  });
+}
+
+// --- Intro invite card (Entry 52 revision) -------------------------------
+// Replaces the old auto-play trigger entirely. A small, dismissible,
+// non-blocking card — same "honest heads-up, never forced" spirit as the
+// mobile-viewport banner. Shown once per unseen state near the top of the
+// page; clicking it plays the intro (a real user gesture, so audio always
+// works), dismissing it just hides it for this pageview without marking
+// the sequence "seen" — the student can still find it later via "▶ Replay
+// Intro" in the main controls either way.
+// --- Welcome gate (Entry 52, 2nd revision) --------------------------------
+// Full-screen first-visit gate — replaces the earlier inline invite card.
+// While ungated visitors are viewing the app normally, a genuine first-time
+// visitor sees ONLY this (see body.app-gated in the CSS, which hides
+// #appLayout/#feedbackWidget/#mobileNoticeBanner entirely) until they pick
+// one of the two options below. Either path ends the same way: the gate
+// closes, the app becomes visible, and the coach-mark guide fires exactly
+// as it always has — the only thing that changed is WHEN that first
+// reveal happens, and whether the intro story played first.
+const welcomeGateEl = document.getElementById('welcomeGate');
+const welcomeGateWatchBtn = document.getElementById('welcomeGateWatchBtn');
+const welcomeGateSkipBtn = document.getElementById('welcomeGateSkipBtn');
+
+// Resolves the gate visually (app becomes visible, gate marked seen) but
+// does NOT decide when/whether the guide tour fires — callers do that
+// explicitly, since the two paths need different timing (see below).
+function resolveWelcomeGate() {
+  document.body.classList.remove('app-gated');
+  markTourSeen('welcomeGate');
+}
+
+function maybeStartMainTour() {
+  if (!hasSeenTour('mainApp')) {
+    setTimeout(() => startTour('mainApp', MAIN_APP_TOUR_STEPS), 400);
+  }
+}
+
+if (welcomeGateWatchBtn) {
+  welcomeGateWatchBtn.addEventListener('click', () => {
+    // Reveal the app first (so it's not hidden behind two stacked
+    // full-screen overlays), then immediately hand off into the intro
+    // sequence, which draws its own overlay on top — same visual result
+    // as before (full-screen story), just via one gate instead of two.
+    // The guide tour is intentionally NOT scheduled here — it would fire
+    // ~400ms later, while the ~45s intro story is still playing underneath
+    // it. Instead it's passed as the intro's onComplete callback, so it
+    // only appears once the story has actually finished (or been skipped
+    // via the intro's own Skip button).
+    resolveWelcomeGate();
+    startIntroSequence(maybeStartMainTour);
+  });
+}
+if (welcomeGateSkipBtn) {
+  welcomeGateSkipBtn.addEventListener('click', () => {
+    resolveWelcomeGate();
+    maybeStartMainTour();
+  });
+}
+
+// Note: the gate's INITIAL hidden state is applied synchronously by the
+// inline <script> at the top of <body> in index.html — not here. This
+// module script is deferred by the browser (type="module"), so by the
+// time this file runs, the page has already painted; relying on this code
+// to apply the class would flash the real app UI first on every visit,
+// defeating the point of the gate. This block only ever REMOVES the class
+// (via resolveWelcomeGate(), wired to the two buttons above).
+
+
+// --- Feedback widget (Entry 51) ----------------------------------------
 // Small-ship user feedback, collected via Formspree (free tier, no backend
 // of our own to write or secure — see PROGRESS.md Section 3 for the
 // reasoning). Two kinds of data go up per submission:
@@ -3579,5 +3819,9 @@ async function submitFeedback() {
   }
 }
 feedbackSubmitBtn.addEventListener('click', submitFeedback);
+
+// Note: the welcome gate itself (above) runs synchronously as this script
+// executes, immediately toggling body.app-gated before first paint settles
+// — no deferred call needed here, unlike the old invite-card version.
 
 setup();

@@ -1,5 +1,5 @@
 # PROGRESS LOG — "Mumblew" (reading app)
-Last updated: August 3, 2026 (Entry 50)
+Last updated: August 7, 2026 (Entry 51)
 
 > HOW TO USE: Single source of truth. Claude reads this first in every new chat.
 > Update before ending each session. If Claude contradicts this file, trust this file.
@@ -10,18 +10,12 @@ Last updated: August 3, 2026 (Entry 50)
 > intermediate failed attempts, per-word breakdowns). Implementation-level detail
 > that's already documented in main.js code comments does NOT need to be duplicated
 > here — point to the comment/function name instead of re-explaining the mechanism.
-> **This pass (Entry 50):** Closed out the Entry 49 sticky-word/lighting
-> investigation with a shipped (local) fix — see Section 3's low-light bullet.
-> Also built, at the student's request, an interactive onboarding system (shared
-> tour engine: main app tour + calibration intro, both re-triggerable; standalone
-> mobile-viewport notice) and a layout restructure (wide-viewport sidebar for the
-> debug panel, auto-grow text input) — see Section 3's onboarding/layout bullet.
-> All of it live-tested and confirmed by the student, including two real bugs the
-> student caught (a resize-blind mobile-notice check, and a dim-calibration blind
-> spot in the low-light detector — see Section 2's new corollary). Entry 49's
-> temporary diagnostics are fully removed. Deploy + this log update were both
-> deliberately deferred until the student's full to-do list for this chat was
-> done — now it is. Next up: Small Ship (Section 3d #3).
+> **This pass (Entry 51):** Shipped + deployed the feedback widget and its CSP fix.
+> Analyzed 10 outside-reader reviews — see Section 3's review-findings bullet for
+> the compressed takeaway. Opened (undecided) a progressive-disclosure UI-cleanup
+> question. Designed a full 8-panel intro sequence + narration script; art assets
+> generated and locked. Build + ElevenLabs audio deferred to next session — see
+> Section 3d.
 
 ---
 
@@ -237,6 +231,52 @@ for late-stage bulbar ALS — biological ceiling, not a design gap.
   lazy-loaded `pdfjs-dist`, saved text persists via IndexedDB (`mumblewDB`/
   `savedText`), calibration data on localStorage. Full dark-themed redesign shipped.
 
+- **Feedback widget — SHIPPED + DEPLOYED, Entry 51.** Formspree-backed
+  (free tier), collapsible corner widget: star rating + quick tags +
+  optional text, plus auto-captured context (browser, viewport,
+  calibration status, speed setting). Honeypot + soft client-side
+  cooldown for spam/dupes — see `submitFeedback()` in main.js for the
+  live mechanism. One real bug hit and fixed: `vercel.json`'s CSP
+  `connect-src` silently blocked the Formspree request post-deploy —
+  fixed by adding `https://formspree.io` to the allowlist. Confirmed
+  working end-to-end on the live Vercel deploy.
+
+- **10 outside-reader reviews — analyzed, Entry 51.** Small sample (10,
+  mixed Formspree + social media), so treated as directional not
+  conclusive. Neither Section 3d #4 candidate (mobile fix, adaptive
+  light) got a single mention. Real recurring gaps: (1) onboarding
+  comprehension — persists for most testers despite Entry 50's tour;
+  (2) camera/privacy trust — several testers read the camera prompt as
+  suspicious, privacy messaging isn't reaching them before the prompt;
+  (3) one design tension worth future discussion, not a bug: sustained
+  open-mouth reads as continuous "engaged" by current design, which
+  could let a low-focus user disengage while still triggering speech.
+  Decision: reprioritize Section 3d #4 around these findings instead of
+  the original two candidates — see Section 3d.
+
+- **UI cleanup — discussed, Entry 51, UNDECIDED.** Student flagged the
+  main column as cluttered ("cockpit") — confirmed by inventory: 6
+  stacked control clusters visible essentially all at once before the
+  reading pane. Reframed as a progressive-disclosure question (show only
+  what's relevant to the current step) vs. current all-at-once layout.
+  No decision made yet — revisit before building anything here.
+
+- **Intro sequence — DESIGNED + ART LOCKED, Entry 51. NOT YET BUILT.**
+  Problem/solution narrative (not a feature tour) to play before
+  onboarding, aimed at the comprehension gap above. 8-panel illustrated
+  story (John/frustration/sister introduces Mumblew/color-bloom payoff),
+  ~70-75s, narrated. Voice direction: warm, calm, nature-documentary
+  style, via ElevenLabs free tier (non-commercial license — revisit if
+  Phase 15 paywall ever happens). Art: generated via Gemini after
+  Leonardo AI repeatedly hallucinated wrong objects (desktop instead of
+  laptop) and real brand logos across multiple model/preset attempts;
+  final style drifted softer/more polished than the original pencil-sketch
+  reference — accepted as final, scoped as a free-tool limitation, not
+  revisited further. Panel order confirmed correct. **Still needed before
+  build:** ElevenLabs mp3 narration for all 8 panels. Sequencing/timing
+  code not started — plan is to extend the existing Entry 50 tour-engine
+  rather than build a separate system.
+
 ### 3b. Scope decisions
 
 - Platform: Web app, Chrome-first. Cross-browser support not a priority pre-demo
@@ -244,39 +284,38 @@ for late-stage bulbar ALS — biological ceiling, not a design gap.
 - Security: `textContent` never `innerHTML` (XSS guard), pinned CDN versions, CSP
   header, camera-privacy disclosure, HTTPS via Vercel. Full review at Phase 14.
 
-## 3d. Priority order for remaining work (revised Entry 49; #1-2 closed Entry 50)
+## 3d. Priority order for remaining work (revised Entry 51; #1-3 closed)
 
-**Rationale (Entry 49):** student proposed inserting an early real-user-feedback
-round (10-20 outside readers) ahead of the remaining build phases — solo
-algorithm-tuning has hit diminishing returns; real users will surface more per
-hour than another tuning pass. Agreed. Amendment: don't small-ship while mobile
-is silently broken or the light issue silently fails mid-sentence — both need
-at least an honest heads-up first, or tester feedback just restates known bugs
-instead of teaching anything new.
+**Rationale (Entry 49, updated Entry 51):** original plan was small-ship
+then let feedback decide between finishing mobile or the adaptive light
+system. Feedback came back Entry 51 and picked neither — real gaps were
+onboarding comprehension and camera/privacy trust (see Section 3's
+review-findings bullet). Priority order below reflects that.
 
-1. ~~Lighting warning~~ — **DONE, Entry 50** (see Section 3's low-light bullet).
-2. ~~Onboarding tour (app guide + calibration intro) + layout polish~~ —
-   **DONE, Entry 50.** Added mid-sequence at the student's request (pre-ship
-   polish: non-technical users need more than the debug panel to understand
-   the app) — see Section 3's onboarding/layout bullet.
-3. **Small ship, scoped honestly** — NEXT UP. Desktop/laptop only (the app
-   tour already says so), recommend decent lighting. Gather feedback from
-   ~10-20 outside readers.
-4. **Let feedback decide next priority** among: finishing the Entry 48
-   mobile highlighter fix (built, desktop-tested, needs mobile pass +
-   deploy), the fuller adaptive light system (if the shipped warning proves
-   insufficient), or whatever else surfaces. Don't pre-commit further than
-   this until feedback is in hand.
-5. **Phase 13** (distance/recalibration robustness) — still likely NOT
-   needed; MAR's ratio design is self-normalizing against camera distance.
-   Revisit only if real testing shows a concrete problem.
-6. **PWA packaging** — manifest + service worker + icons, mostly free. iOS
-   Safari camera-in-installed-PWA access is historically unreliable — keep
-   the camera flow tested in regular Safari-tab mode as the iPad fallback.
-7. **Phase 14** (security review), **Phase 15** (shipping prep + paywall,
-   with the standing ethical note: ALS/paralysis audience means a default
-   paywall deserves a deliberate decision) — last, unchanged.
-8. **Quality-of-life changes** — not yet scoped; likely informed by feedback.
+1. ~~Lighting warning~~ — DONE, Entry 50.
+2. ~~Onboarding tour + layout polish~~ — DONE, Entry 50.
+3. ~~Small ship + gather feedback~~ — DONE, Entry 51 (10 reviews analyzed).
+4. **Intro sequence build** — NEXT UP. Design + art locked Entry 51.
+   Needs: ElevenLabs narration mp3s for all 8 panels, then sequencing/
+   timing code (extend Entry 50's tour engine). See Section 3's intro-
+   sequence bullet for full status.
+5. **UI cleanup (progressive disclosure)** — discussed Entry 51, not yet
+   decided or built. Likely follows the intro sequence, since both touch
+   first-run experience — revisit sequencing when intro build starts.
+6. **Camera/privacy trust messaging** — surfaced Entry 51, not yet
+   addressed. Cheap, high-leverage (explain on-device/local-only before
+   the permission prompt, not after). Candidate for same session as UI
+   cleanup.
+7. Mobile highlighter fix, fuller adaptive light system — deprioritized,
+   Entry 51 (real feedback didn't surface either as a pain point).
+   Revisit only if a future round of feedback raises them again.
+8. **Phase 13** (distance/recalibration robustness) — still likely NOT
+   needed. Revisit only if real testing shows a concrete problem.
+9. **PWA packaging** — manifest + service worker + icons, mostly free.
+10. **Phase 14** (security review), **Phase 15** (shipping prep +
+    paywall, with the standing ethical note: ALS/paralysis audience
+    means a default paywall deserves a deliberate decision) — last.
+11. **Quality-of-life changes** — not yet scoped.
 
 ## 4. Roadmap
 
@@ -296,14 +335,21 @@ instead of teaching anything new.
       Entry 45.** Extended Entry 50 with the low-light reason.
 - [x] **Speed calibration rebuild (manual slider) — shipped, Entry 46.**
       Anchor tuning closed Entry 47; ruled out as sticky-word cause, Entry 49.
-- [ ] **Mobile highlighter-freeze fix** — built, desktop-tested only, NOT
-      deployed, NOT mobile-tested. Parked pending Section 3d sequencing.
+- [x] **Mobile highlighter-freeze fix** — built, desktop-tested only, NOT
+      deployed, NOT mobile-tested. Deprioritized, Entry 51 (feedback didn't
+      surface it as a pain point).
 - [x] **Low-light detection — root cause found Entry 49, fix BUILT + TESTED
       + CONFIRMED Entry 50** (self-calibrating baseline + absolute-floor
-      backstop). Local only, not yet deployed.
+      backstop). Deployed.
 - [x] **Onboarding tour + layout restructure — BUILT + TESTED Entry 50.**
-      Local only, not yet deployed.
-- [ ] **Small ship + gather user feedback (10-20 readers)** — Section 3d #3, NEXT.
+      Deployed. Comprehension gap persists per Entry 51 feedback — see
+      intro-sequence work below.
+- [x] **Feedback widget (Formspree) — SHIPPED + DEPLOYED, Entry 51.**
+- [x] **Small ship + gather user feedback (10-20 readers)** — DONE, Entry 51.
+- [ ] **Intro sequence** — design + art locked Entry 51, build not started.
+      Section 3d #4, NEXT.
+- [ ] **UI cleanup (progressive disclosure)** — discussed Entry 51, undecided.
+- [ ] **Camera/privacy trust messaging** — surfaced Entry 51, not addressed.
 - [ ] **Distance/recalibration robustness (Phase 13)** — likely not needed.
 - [ ] **PWA packaging** — decided as a direction, not yet built.
 - [ ] **Phase 14:** Full security review pass — not yet started.
@@ -312,21 +358,15 @@ instead of teaching anything new.
 
 ## 5. Current status
 
-Project folder `reading-app`: `index.html` + `main.js`. **Entries 45-47 are
-deployed to Vercel.** Entries 48-50 (mobile-highlighter fallback, low-light
-detection, onboarding tour, layout restructure) all exist in the local
-`main.js`/`index.html` only — not deployed, not mobile-tested. Deploy was
-deliberately held until the student's full to-do list for this chat was
-done (student's call, confirmed Entry 50).
+Project folder `reading-app`: `index.html` + `main.js`. **Entries 45-51 are
+deployed to Vercel and confirmed live**, including the feedback widget and
+its CSP fix. Mobile highlighter fix stays local-only/undeployed — parked,
+not currently prioritized (see Section 3d).
 
-Entry 49's temporary diagnostics are fully removed — nothing local-only-and-
-temporary left to strip out.
-
-**Immediate next step (per Section 3d):** deploy Entries 48-50 together, then
-scope and prep a small-ship release for outside feedback (desktop/laptop
-only, mobile explicitly flagged as in-progress via the app tour). Mobile
-highlighter fix and the fuller adaptive light system both stay parked until
-feedback tells us which matters more.
+**Immediate next step (per Section 3d):** build the Entry 51 intro
+sequence — needs ElevenLabs narration mp3s for all 8 panels first, then
+sequencing/timing code extending the Entry 50 tour engine. UI cleanup and
+camera/privacy messaging follow after.
 
 ## 6. Log of sessions
 
@@ -371,3 +411,14 @@ feedback tells us which matters more.
   text input) — both live-tested, with two real student-caught bugs fixed
   along the way. Deploy and this log update both deferred until now, per
   the student. Next: Small Ship (Section 3d #3).
+- **Entry 51 (Aug 7):** Shipped + deployed the feedback widget (Formspree)
+  and fixed a CSP block that silently killed submissions. Small-shipped and
+  collected 10 outside-reader reviews — analyzed together, found the real
+  gaps were onboarding comprehension and camera/privacy trust, not either
+  of the two previously-parked candidates (mobile fix, adaptive light) —
+  see Section 3. Discussed UI clutter (undecided, progressive-disclosure
+  question). Designed a full 8-panel problem/solution intro sequence with
+  narration script and voice direction; art assets generated (Gemini, after
+  Leonardo AI repeatedly hallucinated wrong objects/logos) and locked as
+  final. Build deferred to next session, pending ElevenLabs narration audio
+  for all 8 panels.
