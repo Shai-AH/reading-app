@@ -135,6 +135,35 @@
     #textInputPanel { --panel-accent: var(--accent-amber); }
     #debugPanel { --panel-accent: var(--accent-pink); }
 
+    /* Entry 53: camera gate card. Teal accent — same family as calibration,
+       since both are "camera trust" moments. Sits where the old always-on
+       #privacyNote used to live; hidden entirely (not just emptied) once
+       camera access is granted, see setCameraGateResolved() in main.js. */
+    #cameraGateCard {
+      --panel-accent: var(--accent-teal);
+      max-width: 640px;
+      margin-top: 4px;
+    }
+    #cameraGateTip {
+      color: var(--text-secondary);
+      font-size: 14px;
+      line-height: 1.5;
+      margin: 0 0 12px 0;
+    }
+    #cameraGateBtn {
+      border-color: var(--accent-teal);
+      font-size: 15px;
+      padding: 10px 16px;
+    }
+    #cameraGateStatus {
+      margin: 8px 0 0 0;
+      font-size: 12.5px;
+      min-height: 0;
+    }
+    #cameraGateStatus.status-error { color: var(--text-danger); }
+    #cameraGateStatus:empty { display: none; }
+    #cameraGateCard.gate-resolved { display: none; }
+
     button {
       background: var(--surface-raised);
       color: var(--text-primary);
@@ -882,21 +911,58 @@
     <img src="mumblew_logo.png" alt="Mumblew — silent read-along" style="height: 96px; width: auto; display: block;">
   </div>
   <p class="intro-text">Mouth along with the text below — Mumblew reads it aloud at your pace, no buttons or timers needed.</p>
-  <p id="privacyNote" class="intro-text">
-    Your camera video is processed entirely on your device and is never uploaded,
-    recorded, or sent anywhere. You can verify this yourself in your browser's
-    DevTools → Network tab.
-  </p>
+
+  <!-- Entry 53 (camera/privacy trust messaging): replaces the old always-on
+       #privacyNote + auto-fired getUserMedia() call. Previously setup() called
+       startWebcam() automatically on page load, so the native camera prompt
+       could appear before a visitor had read anything or decided they were
+       ready — and the only trust message on the page assumed a technical
+       audience (DevTools → Network tab), which fails both non-technical and
+       mobile users (mobile has no DevTools). The gate card is now the ONLY
+       thing that triggers camera access, gated behind an explicit click, with
+       a trust message a non-technical/mobile reader can actually use: the
+       offline claim, not a devtools instruction. See cameraGateBtn's click
+       handler (requestCameraAccess) in main.js.
+
+       #cameraTrustBlock wraps both the gate card and the post-grant reminder
+       and is itself always visible — this gives the main-app tour (see
+       MAIN_APP_TOUR_STEPS) a single stable target regardless of which child
+       is showing, instead of pointing at whichever one happens to currently
+       be display:none. -->
+  <div id="cameraTrustBlock">
+    <div id="cameraGateCard" class="panel">
+      <p id="cameraGateTip">
+        💡 <strong>Did you know?</strong> Once Mumblew is up and running, you can turn
+        your Wi-Fi off completely — it'll keep working exactly the same. Your camera
+        video never leaves your device, so there's nothing to send anywhere.
+      </p>
+      <!-- Starts disabled — enabled by setup() in main.js once MediaPipe has
+           finished loading, so a click can never race ahead of it. -->
+      <button id="cameraGateBtn" type="button" disabled>Turn on camera to begin</button>
+      <p id="cameraGateStatus" class="intro-text" role="status">Getting ready…</p>
+    </div>
+
+    <!-- Persistent, low-key reminder — replaces the old #privacyNote's job
+         once the camera is granted. Deliberately short and non-technical;
+         the fuller explanation lives in the gate card above, shown once. -->
+    <p id="privacyNote" class="intro-text" style="display: none;">
+      📷 Camera is only used to detect mouth movement. Nothing is recorded, saved, or sent anywhere.
+    </p>
+  </div>
 
   <div id="container" class="video-hidden">
     <video id="webcam" autoplay playsinline muted></video>
     <canvas id="overlay"></canvas>
   </div>
-  <p class="intro-text" style="margin-top: 6px; font-size: 12px;">Camera preview appears only during calibration — hidden the rest of the time.</p>
+  <p id="cameraPreviewNote" class="intro-text" style="margin-top: 6px; font-size: 12px; display: none;">Camera preview appears only during calibration — hidden the rest of the time.</p>
 
   <div id="controls" style="margin-top: 12px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
     <button id="startBtn" disabled>Start Reading</button>
-    <button id="calibrateBtn">Calibrate</button>
+    <!-- Entry 53: now starts disabled — previously had no disabled attribute
+         at all, so it was technically clickable before the camera was even
+         requested (startCalibration() assumes video.srcObject is already
+         set). Re-enabled in setCameraGateResolved() once access is granted. -->
+    <button id="calibrateBtn" disabled>Calibrate</button>
     <button id="helpTourBtn" type="button" title="Show the app guide again">❓ Guide</button>
     <button id="introReplayBtn" type="button" title="Watch the intro story again">▶ Replay Intro</button>
     <label style="display: flex; align-items: center; gap: 6px;">

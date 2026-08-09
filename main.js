@@ -5,6 +5,21 @@ const canvas = document.getElementById('overlay');
 const ctx = canvas.getContext('2d');
 const videoContainer = document.getElementById('container');
 
+// --- Entry 53: camera/privacy trust messaging + camera gating ---
+// getUserMedia() no longer fires automatically from setup() — it only ever
+// fires from requestCameraAccess(), triggered by an explicit click on
+// cameraGateBtn. cameraGranted/mediaPipeReady gate calibrateBtn/startBtn
+// (see updateStartButtonState) so neither can be clicked before tracking can
+// actually work. See index.html's #cameraTrustBlock comment for the full
+// reasoning.
+const cameraGateCard = document.getElementById('cameraGateCard');
+const cameraGateBtn = document.getElementById('cameraGateBtn');
+const cameraGateStatus = document.getElementById('cameraGateStatus');
+const privacyNote = document.getElementById('privacyNote');
+const cameraPreviewNote = document.getElementById('cameraPreviewNote');
+let cameraGranted = false;
+let mediaPipeReady = false;
+
 // --- Phase 10c: webcam/mesh visibility ---
 // Decided in scoping (Entry 27): the live camera feed + mesh overlay is
 // only useful to look at while the calibration wizard needs the student to
@@ -1480,7 +1495,7 @@ function cancelCalibration() {
   calibrationPanel.style.display = 'none';
   setCalibrationVideoVisible(false);
   updateStartButtonState();
-  calibrateBtn.disabled = false;
+  updateCalibrateButtonState();
 }
 
 function renderCalibrationStep() {
@@ -1691,7 +1706,7 @@ function finishCalibration() {
   calibrationCountdownEl.textContent = '';
   calibration.active = false;
   updateStartButtonState();
-  calibrateBtn.disabled = false;
+  updateCalibrateButtonState();
   setTimeout(() => {
     calibrationPanel.style.display = 'none';
     setCalibrationVideoVisible(false);
@@ -1703,7 +1718,7 @@ function showCalibrationFailure(message) {
   calibrationMessageEl.textContent = message;
   calibrationRetryBtn.style.display = 'inline-block';
   updateStartButtonState();
-  calibrateBtn.disabled = false;
+  updateCalibrateButtonState();
 }
 
 // Applies a calibration result (either freshly computed or loaded from
@@ -1834,7 +1849,23 @@ function hasLoadedText() {
 // call sites can just call this instead of guessing startBtn.disabled = false
 // is always correct.
 function updateStartButtonState() {
-  startBtn.disabled = !hasLoadedText() || (calibration && calibration.active);
+  // Entry 53: cameraGranted added — startBtn used to only check text/
+  // calibration state, silently assuming the webcam was already running
+  // (true before Entry 53, since setup() auto-started it). Now that camera
+  // access is gated behind an explicit click, Start Reading has to wait on
+  // it too, or predictLoop would never be running when it's clicked.
+  startBtn.disabled = !hasLoadedText() || !cameraGranted || (calibration && calibration.active);
+}
+
+// Entry 53: same "single source of truth" pattern as updateStartButtonState
+// above. calibrateBtn used to just get hardcoded to `.disabled = false` at
+// every "re-enable" call site (cancel/finish/fail), which was safe before
+// Entry 53 because the webcam was always already running by the time any of
+// those could fire. Now that camera access is gated behind an explicit
+// click, every one of those call sites needs to check cameraGranted instead
+// of assuming it — centralizing here means they can't drift out of sync.
+function updateCalibrateButtonState() {
+  calibrateBtn.disabled = !cameraGranted || (calibration && calibration.active);
 }
 
 function wordCount(text) {
@@ -2974,10 +3005,39 @@ async function setup() {
 
   loadSavedCalibration();
   await loadSavedText();
-  startWebcam();
+
+  // Entry 53: startWebcam() used to be called right here, unconditionally,
+  // the moment MediaPipe finished loading — meaning the native camera
+  // permission prompt could interrupt a visitor before they'd read a single
+  // word of the page. It now only ever fires from requestCameraAccess(),
+  // triggered by an explicit click on cameraGateBtn (see #cameraTrustBlock
+  // in index.html). All this does is mark MediaPipe as ready and unlock that
+  // button if the person already clicked it while MediaPipe was still
+  // loading (see requestCameraAccess's own "not ready yet" branch below).
+  mediaPipeReady = true;
+  cameraGateBtn.disabled = false;
+  cameraGateStatus.textContent = '';
+  cameraGateStatus.classList.remove('status-error');
 }
 
-async function startWebcam() {
+// Entry 53: this is now the ONLY call site for getUserMedia() in the app —
+// only ever runs from a real click on cameraGateBtn (see listener below),
+// never automatically. Keeps the exact same stream-setup logic the old
+// auto-fired startWebcam() had; what changed is *when* it can run and how
+// it reports success/failure (inline status text instead of a native
+// alert(), which didn't match the rest of the app's plain-English-message
+// pattern used everywhere else, e.g. the Entry 45 warning box).
+async function requestCameraAccess() {
+  // Guards the edge case where someone clicks before setup() finishes
+  // loading MediaPipe (slow connection) — the button should be disabled
+  // during that window (see index.html), so this is defensive, not the
+  // primary gate. setup() clears the "getting ready" status once ready.
+  if (!mediaPipeReady) return;
+
+  cameraGateBtn.disabled = true;
+  cameraGateStatus.textContent = 'Requesting camera access…';
+  cameraGateStatus.classList.remove('status-error');
+
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: true,
@@ -2985,11 +3045,35 @@ async function startWebcam() {
     });
     video.srcObject = stream;
     video.addEventListener('loadeddata', predictLoop);
+    setCameraGateResolved();
   } catch (err) {
     console.error('Webcam error:', err);
-    alert('Could not access webcam: ' + err.message);
+    cameraGateBtn.disabled = false;
+    cameraGateStatus.classList.add('status-error');
+    // Deliberately plain-English, no error.message/err.name shown — those
+    // are technical (e.g. "NotAllowedError") and not meaningful to this
+    // app's non-technical/mobile audience, matching the reasoning that
+    // drove the rest of this trust-messaging pass.
+    cameraGateStatus.textContent =
+      "Camera access was blocked or dismissed. Mumblew needs it to track your mouth movement — click the button above to try again.";
   }
 }
+
+// Entry 53: single place that flips the page over from "gate" to "granted"
+// state — hides the gate card, reveals the short persistent reminder +
+// calibration-preview note, and unlocks Calibrate/Start Reading (via their
+// respective updateXButtonState() functions, so this doesn't have to
+// duplicate their logic).
+function setCameraGateResolved() {
+  cameraGranted = true;
+  cameraGateCard.classList.add('gate-resolved');
+  privacyNote.style.display = '';
+  cameraPreviewNote.style.display = '';
+  updateCalibrateButtonState();
+  updateStartButtonState();
+}
+
+cameraGateBtn.addEventListener('click', requestCameraAccess);
 
 // --- Phase 7c: dynamic frame rate ---
 // Full-rate tracking is only actually needed while something time-sensitive
@@ -3295,9 +3379,13 @@ const MAIN_APP_TOUR_STEPS = [
     body: 'Mumblew reads text aloud, paced by your own quiet mouth movement instead of buttons or timers. This quick guide covers the basics — takes about a minute.'
   },
   {
-    targetId: 'privacyNote',
+    // Entry 53: targets the always-visible wrapper (#cameraTrustBlock),
+    // not #privacyNote directly — that element is display:none until
+    // camera access is granted, which would leave the tour highlighting
+    // a hidden, zero-size element if run before then.
+    targetId: 'cameraTrustBlock',
     title: 'Your camera stays private',
-    body: 'Video is processed entirely on your device and is never uploaded, recorded, or sent anywhere.'
+    body: 'Camera video is processed entirely on your device and is never uploaded, recorded, or sent anywhere — you can even go offline once the app is running and it keeps working the same.'
   },
   {
     title: 'Best on a laptop or desktop',
