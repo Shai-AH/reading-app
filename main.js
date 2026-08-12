@@ -1398,35 +1398,55 @@ function resetTroubleShading() {
 
 // Phase 7b's 'facing'/'away' pose-calibration steps removed Entry 45
 // alongside the rest of head-pose gating — wizard is 3 steps now, not 5.
+// UI cleanup pass, round 3 (on-camera calibration): step 1's stillness gate
+// and step 2's mouth-open gate both need a "confident enough" detection
+// window AND a hard timeout fallback, so nobody — including someone with
+// limited motor control — can get stuck on a step that never fires. The
+// numbers below are reasoned starting guesses, not yet tuned against real
+// logged data — same "unvalidated until tested live" status RISK_WINDOW_HALF_MS
+// above carried before its own real-world tuning pass.
+const STILLNESS_WINDOW_MS = 500;        // rolling window used to judge "not moving"
+const STILLNESS_MAR_RANGE_MAX = 0.03;   // max MAR range within the window to count as "still"
+const STILLNESS_MIN_HOLD_MS = 400;      // window must stay under the range max this long before unlocking
+const STILLNESS_TIMEOUT_MS = 7000;      // auto-unlock the button anyway if stillness is never confidently detected
+
+const MOUTH_OPEN_RELATIVE_DELTA = 0.05; // how far above the step-1 neutral baseline counts as "opened"
+const MOUTH_OPEN_ABSOLUTE_FLOOR = 0.12; // backstop in case the neutral baseline itself came out noisy/near-zero
+const MOUTH_OPEN_TIMEOUT_MS = 8000;     // auto-start sampling anyway if mouth-open is never confidently detected
+
 const CALIBRATION_STEPS = [
   {
     id: 'neutral',
-    label: 'Step 1 of 3 — Neutral face',
-    instruction: 'Relax your mouth naturally, like you\'re not reading. Hold still.',
-    prepMs: 1000,
+    label: 'Step 1 of 3 — Stay still',
+    instruction: "Relax your mouth. We'll count down once you're steady.",
     sampleMs: 3000,
     metric: 'mar'
   },
   {
     id: 'mutter',
     label: 'Step 2 of 3 — Silent mouthing',
-    instruction: 'Silently mouth this sentence as if reading aloud, no need to make sound: ' +
-      '"The quick brown fox jumps over the lazy dog."',
-    prepMs: 1000,
+    instruction: 'Tap below, then silently mouth the sentence shown.',
+    // Entry 53's UI cleanup, round 3: replaces "The quick brown fox jumps
+    // over the lazy dog" — that sentence has zero b/m/p sounds, meaning
+    // calibration never actually sampled a full lip closure, the one
+    // movement RISKY_CONSONANTS/RISK_WINDOW_HALF_MS above specifically
+    // exists to detect. This sentence hits b/m/p at both word-initial and
+    // mid-word positions (Mumblew, helps, people, mouth, movements),
+    // matching the Fix 3c-2 finding that word position matters.
+    sentence: 'Mumblew helps people read by watching quiet mouth movements.',
     sampleMs: 4000,
     metric: 'mar'
   },
   {
     id: 'rate',
     // Entry 46: rebuilt from a timed mouthing sample into a manual slider —
-    // see PROGRESS.md Section 3 for the full reasoning. No prepMs/sampleMs;
-    // this step doesn't run through the per-frame prep/sampling pipeline at
-    // all (updateCalibration() returns immediately for metric === 'rate').
+    // see PROGRESS.md Section 3 for the full reasoning. No sampleMs; this
+    // step doesn't run through the per-frame sampling pipeline at all
+    // (updateCalibration() returns immediately for metric === 'rate').
     // Advancing happens via the "Set speed" button (finishRateStep below),
     // not a countdown.
     label: 'Step 3 of 3 — Your pace',
-    instruction: 'Drag the slider to a speed that feels comfortable, and use "Test voice" to hear it. ' +
-      'You can fine-tune this later too.',
+    instruction: 'Drag to a comfortable speed, then confirm.',
     metric: 'rate'
   }
 ];
@@ -1434,10 +1454,21 @@ const CALIBRATION_STEPS = [
 let calibration = {
   active: false,
   stepIndex: -1,
-  phase: null,          // 'prep' | 'sampling'
+  // UI cleanup pass, round 3: 'awaiting-stillness' (step 1, gated by
+  // detection) -> 'sampling' (unchanged pipeline). 'awaiting-ready' (step 2,
+  // gated by the user's own click) -> 'awaiting-mouth-open' (gated by
+  // detection) -> 'sampling' (unchanged pipeline). Rate step doesn't use
+  // phase at all. Replaces the old fixed-timer 'prep' phase entirely.
+  phase: null,
   phaseStartTime: 0,
   currentSamples: [],   // samples for the step currently being collected (mar/pose steps)
   results: {},           // stepId -> array of samples, filled in as steps complete
+  // Rolling buffer for step 1's stillness check — {t, mar} pairs within the
+  // last STILLNESS_WINDOW_MS, trimmed each frame in updateCalibration().
+  stillnessBuffer: [],
+  stillnessConfirmed: false,
+  stillnessConfirmedAt: 0,
+  neutralBaselineMar: null, // computed once, when step 2's mouth-open watch begins
   // Entry 46: replaces the old rateTracker — just the slider's current
   // value, live-updated on 'input' while the rate step is showing, read
   // once when the user confirms via finishRateStep().
@@ -1454,6 +1485,14 @@ const calibrationCancelBtn = document.getElementById('calibrationCancelBtn');
 const calibrationRetryBtn = document.getElementById('calibrationRetryBtn');
 const calibrationStatusValueEl = document.getElementById('calibrationStatusValue');
 const speedCalibrationValueEl = document.getElementById('speedCalibrationValue');
+// UI cleanup pass, round 3: the on-camera action button shared by steps 1
+// and 2 (step 1: "Press when ready", unlocked by stillness detection;
+// step 2: "Ready to mumble?", always enabled immediately) and the sentence
+// display for step 2, revealed only once that button is pressed.
+const calActionBtnEl = document.getElementById('calActionBtn');
+const calSentenceEl = document.getElementById('calSentence');
+const calSentenceTimerEl = document.getElementById('calSentenceTimer');
+const calErrorCardEl = document.getElementById('calErrorCard');
 
 function average(arr) {
   if (arr.length === 0) return 0;
@@ -1473,10 +1512,14 @@ function startCalibration() {
   calibration = {
     active: true,
     stepIndex: 0,
-    phase: 'prep',
+    phase: 'awaiting-stillness',
     phaseStartTime: performance.now(),
     currentSamples: [],
     results: {},
+    stillnessBuffer: [],
+    stillnessConfirmed: false,
+    stillnessConfirmedAt: 0,
+    neutralBaselineMar: null,
     selectedRate: DEFAULT_PERSONALIZED_RATE
   };
 
@@ -1485,9 +1528,11 @@ function startCalibration() {
   speechSwitchBtn.classList.add('is-inactive'); // predictLoop skips the per-frame sync during calibration, so set explicitly here
   calibrationRetryBtn.style.display = 'none';
   calibrationMessageEl.textContent = '';
+  calErrorCardEl.style.display = 'none';
   calibrationPanel.style.display = 'block';
   setCalibrationVideoVisible(true); // student needs to see themselves to position for calibration
   renderCalibrationStep();
+  updateProgressUI();
 }
 
 function cancelCalibration() {
@@ -1496,20 +1541,39 @@ function cancelCalibration() {
   setCalibrationVideoVisible(false);
   updateStartButtonState();
   updateCalibrateButtonState();
+  updateProgressUI();
 }
 
 function renderCalibrationStep() {
   const step = CALIBRATION_STEPS[calibration.stepIndex];
   calibrationStepEl.textContent = step.label;
   calibrationInstructionEl.textContent = step.instruction;
+  calSentenceEl.style.display = 'none';
+  calSentenceEl.textContent = '';
+  calSentenceTimerEl.style.display = 'none';
 
   const isRateStep = step.metric === 'rate';
   rateStepPanelEl.style.display = isRateStep ? 'block' : 'none';
-  calibrationCountdownEl.style.display = isRateStep ? 'none' : 'block';
+  calibrationCountdownEl.style.display = 'none';
+  calActionBtnEl.style.display = 'none';
+
   if (isRateStep) {
     calibration.selectedRate = DEFAULT_PERSONALIZED_RATE;
     rateSliderEl.value = String(DEFAULT_PERSONALIZED_RATE);
     updateRateSliderReadout();
+  } else if (calibration.stepIndex === 0) {
+    // Step 1: button starts disabled — updateCalibration()'s stillness
+    // check (or its timeout fallback) is what enables it.
+    calActionBtnEl.style.display = 'inline-block';
+    calActionBtnEl.disabled = true;
+    calActionBtnEl.textContent = 'Press when ready';
+  } else {
+    // Step 2: this button is always enabled immediately — unlike step 1,
+    // nothing needs to be detected before the person can say "I'm ready to
+    // start," since they haven't done anything yet for us to detect.
+    calActionBtnEl.style.display = 'inline-block';
+    calActionBtnEl.disabled = false;
+    calActionBtnEl.textContent = 'Ready to mumble?';
   }
 }
 
@@ -1517,6 +1581,35 @@ function renderCalibrationStep() {
 // and calibration.selectedRate on every drag/arrow-key tick; nothing is
 // applied to the live app until finishRateStep() commits it, same
 // "preview vs commit" separation the old step had (sampling vs finish).
+// UI cleanup pass, round 3: the one on-camera action button, shared by
+// steps 1 and 2 since only one of them is ever visible at a time (see
+// renderCalibrationStep). Each branch is a manual, user-paced transition —
+// detection only ever unlocks or auto-times-out a button; it never fires a
+// transition by itself without the person's own click, so a stray moment
+// of stillness or an accidental mouth twitch can't start a countdown
+// nobody asked for yet.
+function onCalActionBtnClick() {
+  const now = performance.now();
+
+  if (calibration.stepIndex === 0 && calibration.phase === 'awaiting-stillness') {
+    calibration.phase = 'sampling';
+    calibration.phaseStartTime = now;
+    calibration.currentSamples = [];
+    calActionBtnEl.style.display = 'none';
+    calibrationCountdownEl.style.display = 'block';
+    calibrationInstructionEl.textContent = '';
+  } else if (calibration.stepIndex === 1 && calibration.phase === 'awaiting-ready') {
+    calibration.neutralBaselineMar = average(calibration.results.neutral.map((s) => s.mar));
+    calibration.phase = 'awaiting-mouth-open';
+    calibration.phaseStartTime = now;
+    calActionBtnEl.style.display = 'none';
+    calSentenceEl.textContent = `"${CALIBRATION_STEPS[1].sentence}"`;
+    calSentenceEl.style.display = 'block';
+    calibrationInstructionEl.textContent = 'Go ahead whenever you like.';
+  }
+}
+calActionBtnEl.addEventListener('click', onCalActionBtnClick);
+
 function updateRateSliderReadout() {
   const rate = parseFloat(rateSliderEl.value);
   calibration.selectedRate = rate;
@@ -1559,22 +1652,30 @@ function completeCalibrationStep(now, resultForStep) {
   if (calibration.stepIndex >= CALIBRATION_STEPS.length) {
     finishCalibration();
   } else {
-    calibration.phase = 'prep';
+    // UI cleanup pass, round 3: step 2 starts in 'awaiting-ready' — nothing
+    // to detect yet, just waiting on the person's own "Ready to mumble?"
+    // click (see onCalActionBtnClick). The rate step doesn't use phase at
+    // all (updateCalibration() returns immediately for metric === 'rate'),
+    // so phase is left null there rather than implying a state that's
+    // never actually checked.
+    calibration.phase = calibration.stepIndex === 1 ? 'awaiting-ready' : null;
     calibration.phaseStartTime = now;
     calibration.currentSamples = [];
+    calibration.stillnessBuffer = [];
+    calibration.stillnessConfirmed = false;
+    calibration.stillnessConfirmedAt = 0;
     renderCalibrationStep();
-    // Entry 46: if the step we just moved into is the manual rate step,
-    // show its slider UI immediately — there's no prep countdown to wait
-    // through first (see renderCalibrationStep).
   }
 }
 
-// Entry 46: the 'rate' step no longer runs through the per-frame prep/
-// sampling pipeline at all — it's a manual slider the user sets and
-// confirms via a button click (see renderCalibrationStep/finishRateStep
-// below), not something measured from live MAR frames. updateCalibration
-// is only ever called with mar/pose steps now; guard added defensively in
-// case it's ever invoked while a 'rate' step is current.
+// Handles all four calibration phases. Called once per frame from
+// predictLoop while calibration is active (rate step excepted — it's a
+// manual slider, never routed through here). 'awaiting-ready' does nothing
+// per-frame (purely waiting on the person's own click); 'awaiting-stillness'
+// and 'awaiting-mouth-open' both run a live detection check with a timeout
+// fallback; 'sampling' is the original fixed-duration collection window,
+// unchanged from before this pass — only how each step *arrives* at
+// sampling changed, not sampling itself.
 function updateCalibration(mar) {
   const step = CALIBRATION_STEPS[calibration.stepIndex];
   if (step.metric === 'rate') return; // handled entirely by the slider UI, not per-frame
@@ -1582,18 +1683,80 @@ function updateCalibration(mar) {
   const now = performance.now();
   const elapsed = now - calibration.phaseStartTime;
 
-  if (calibration.phase === 'prep') {
-    const remaining = Math.max(0, step.prepMs - elapsed);
-    calibrationCountdownEl.textContent = `Get ready... ${Math.ceil(remaining / 1000)}`;
-    if (elapsed >= step.prepMs) {
-      calibration.phase = 'sampling';
-      calibration.phaseStartTime = now;
-      calibration.currentSamples = [];
+  if (calibration.phase === 'awaiting-ready') {
+    return; // nothing to detect yet — waiting on the person's own click
+  }
+
+  if (calibration.phase === 'awaiting-stillness') {
+    calibration.stillnessBuffer.push({ t: now, mar });
+    calibration.stillnessBuffer = calibration.stillnessBuffer.filter(
+      (s) => now - s.t <= STILLNESS_WINDOW_MS
+    );
+
+    const marsInWindow = calibration.stillnessBuffer.map((s) => s.mar);
+    // Fewer than 2 samples isn't enough to judge variance yet — treat as
+    // "not still" rather than a false positive on the very first frame.
+    const range = marsInWindow.length > 1
+      ? Math.max(...marsInWindow) - Math.min(...marsInWindow)
+      : Infinity;
+    const isCurrentlyStill = range <= STILLNESS_MAR_RANGE_MAX;
+
+    if (isCurrentlyStill) {
+      if (!calibration.stillnessConfirmed) {
+        const oldest = calibration.stillnessBuffer[0];
+        if (oldest && now - oldest.t >= STILLNESS_MIN_HOLD_MS) {
+          calibration.stillnessConfirmed = true;
+          calibration.stillnessConfirmedAt = now;
+        }
+      }
+    } else {
+      // A real movement resets confirmation, but NOT the overall elapsed
+      // timer below — a fidgety person still reaches the fallback instead
+      // of waiting forever for a stillness read that may never come.
+      calibration.stillnessConfirmed = false;
+    }
+
+    if (calibration.stillnessConfirmed && calActionBtnEl.disabled) {
+      calActionBtnEl.disabled = false;
+      calibrationInstructionEl.textContent = "Ready — press below to start.";
+    } else if (!calibration.stillnessConfirmed && elapsed >= STILLNESS_TIMEOUT_MS && calActionBtnEl.disabled) {
+      // Fallback: never got a confident still-enough read. Unlock anyway
+      // rather than leaving someone stuck on a step that may never
+      // register for them — see this pass's constants comment above
+      // CALIBRATION_STEPS for the reasoning.
+      calActionBtnEl.disabled = false;
+      calibrationInstructionEl.textContent = "Whenever you're ready, press below.";
     }
     return;
   }
 
-  // phase === 'sampling'
+  if (calibration.phase === 'awaiting-mouth-open') {
+    // Bootstrapped from step 1's own just-measured neutral baseline, not a
+    // hardcoded constant — the personalized open/close thresholds this
+    // whole calibration run produces don't exist yet, so this can only ever
+    // be a relative comparison against this person's own resting MAR,
+    // backed by an absolute floor in case that baseline itself came out
+    // noisy. Same relative-baseline + absolute-floor pattern as the Entry
+    // 50 low-light fix, reused rather than reinvented.
+    const baseline = calibration.neutralBaselineMar ?? 0;
+    const openedEnough = mar >= baseline + MOUTH_OPEN_RELATIVE_DELTA || mar >= MOUTH_OPEN_ABSOLUTE_FLOOR;
+
+    if (openedEnough || elapsed >= MOUTH_OPEN_TIMEOUT_MS) {
+      calibration.phase = 'sampling';
+      calibration.phaseStartTime = now;
+      calibration.currentSamples = [];
+      // The sentence stays visible — the person is actively reading it
+      // right now, mid-mumble. Only the button-slot changes, from nothing
+      // (already hidden since the "Ready to mumble?" click) to a small
+      // recording indicator. The giant center countdown stays off for this
+      // step — see the sampling branch below for why.
+      calSentenceTimerEl.style.display = 'block';
+      calibrationInstructionEl.textContent = '';
+    }
+    return;
+  }
+
+  // phase === 'sampling' — unchanged pipeline from before this pass.
   // Entry 50: also record the live brightness reading alongside each MAR
   // sample. Costs nothing extra — sampleBrightness() already runs on its
   // own interval and currentBrightness is just read here, not recomputed.
@@ -1603,7 +1766,18 @@ function updateCalibration(mar) {
   // them to sit still in their real reading position/lighting.
   calibration.currentSamples.push({ mar, brightness: currentBrightness });
   const remaining = Math.max(0, step.sampleMs - elapsed);
-  calibrationCountdownEl.textContent = `Hold it... ${Math.ceil(remaining / 1000)}`;
+  const remainingSeconds = Math.ceil(remaining / 1000);
+
+  if (calibration.stepIndex === 0) {
+    // Step 1: nothing else on screen, so the giant center digit is the
+    // whole point — no need to spell out "Hold it..." to be understood.
+    calibrationCountdownEl.textContent = `${remainingSeconds}`;
+  } else {
+    // Step 2: the sentence is the thing that needs attention here, not the
+    // countdown — a small "Recording… Ns" next to it instead of a giant
+    // digit taking over the screen and competing with what they're reading.
+    calSentenceTimerEl.textContent = `Recording… ${remainingSeconds}`;
+  }
 
   if (elapsed >= step.sampleMs) {
     completeCalibrationStep(now, calibration.currentSamples);
@@ -1642,10 +1816,10 @@ function finishCalibration() {
   const marGap = mutterMar - neutralMar;
 
   if (marGap < MIN_MAR_GAP) {
-    showCalibrationFailure(
-      'Not enough difference between the neutral and mouthing steps. ' +
-      'Try exaggerating the silent mouthing a bit more, then retry.'
-    );
+    // UI cleanup pass, round 3 (student nudge): short, plain-English, no
+    // app-internal vocabulary ("neutral"/"mutter"/"gap") — same fact as
+    // before, said the way a non-technical person would actually say it.
+    showCalibrationFailure("Couldn't tell you were mumbling. Move your mouth a bit more.");
     return;
   }
 
@@ -1689,20 +1863,24 @@ function finishCalibration() {
 
   applyCalibration(data);
 
-  calibrationStepEl.textContent = 'Calibration complete';
+  calibrationStepEl.textContent = 'All done ✓';
+  calActionBtnEl.style.display = 'none';
+  calSentenceEl.style.display = 'none';
   // Entry 50 follow-up: doesn't block calibration (the neutral/mutter MAR
   // gap check above already covers whether mouth-tracking itself worked) —
   // just an honest heads-up, matching the project's usual "tell them, don't
   // fail silently" approach. Reuses ABSOLUTE_DARK_EXIT_THRESHOLD as the
   // reference point rather than inventing a third light constant.
+  // UI cleanup pass, round 3 (student nudge): shortened to match the same
+  // plain-English, no-jargon bar as the error message above.
   const isDimCalibration = typeof lightBaseline === 'number' && lightBaseline < ABSOLUTE_DARK_EXIT_THRESHOLD;
   if (isDimCalibration) {
     calibrationInstructionEl.textContent =
-      'Your thresholds have been saved for this device. Heads up: it looks fairly dim right now — ' +
-      'for the most reliable low-light warnings later, consider redoing this step somewhere brighter when you can.';
+      "Saved. It's a bit dim right now — for best results, redo this somewhere brighter later.";
   } else {
-    calibrationInstructionEl.textContent = 'Your thresholds have been saved for this device.';
+    calibrationInstructionEl.textContent = 'Saved for this device.';
   }
+  calibrationCountdownEl.style.display = 'none';
   calibrationCountdownEl.textContent = '';
   calibration.active = false;
   updateStartButtonState();
@@ -1717,8 +1895,17 @@ function showCalibrationFailure(message) {
   calibration.active = false;
   calibrationMessageEl.textContent = message;
   calibrationRetryBtn.style.display = 'inline-block';
+  calErrorCardEl.style.display = 'flex';
+  // Clear the rest of the overlay so the error card is the only thing
+  // showing — otherwise a stale countdown/sentence/button could linger
+  // underneath it.
+  calActionBtnEl.style.display = 'none';
+  calSentenceEl.style.display = 'none';
+  calSentenceTimerEl.style.display = 'none';
+  calibrationCountdownEl.style.display = 'none';
   updateStartButtonState();
   updateCalibrateButtonState();
+  updateProgressUI();
 }
 
 // Applies a calibration result (either freshly computed or loaded from
@@ -1780,6 +1967,13 @@ function applyCalibration(data) {
       lightBaselineValueEl.textContent = 'using default fallback (calibrate to personalize)';
     }
   }
+
+  // UI cleanup pass: this is the one function that runs whether calibration
+  // just finished live or was restored from localStorage at startup, so
+  // it's the right single place to flip this — see hasCustomCalibration's
+  // declaration for the reasoning.
+  hasCustomCalibration = true;
+  updateProgressUI();
 }
 
 // Runs once at startup, before the webcam loop begins producing frames.
@@ -1873,6 +2067,154 @@ function wordCount(text) {
   return trimmed.length === 0 ? 0 : trimmed.split(/\s+/).length;
 }
 
+// --- UI cleanup pass: progressive disclosure (Section 3d #5) ------------
+// Restructures the setup flow (text -> calibrate -> read) into a 3-dot
+// progress strip + accordion, so the next step is visually obvious without
+// reading anything. Deliberately reuses state that already exists
+// (hasLoadedText(), cameraGranted, hasCustomCalibration below) rather than
+// tracking anything new, so this can't drift out of sync with what
+// updateStartButtonState()/updateCalibrateButtonState() already decide.
+// hasCustomCalibration mirrors those two functions' "single source of
+// truth" pattern: set once, in applyCalibration() (the one function that
+// runs whether calibration just finished or was loaded from localStorage),
+// rather than re-derived ad hoc at each call site.
+let hasCustomCalibration = false;
+
+const pStepTextEl = document.getElementById('pStepText');
+const pStepCalEl = document.getElementById('pStepCal');
+const pStepReadEl = document.getElementById('pStepRead');
+const pLine1El = document.getElementById('pLine1');
+const pLine2El = document.getElementById('pLine2');
+const textInputPanelEl = document.getElementById('textInputPanel');
+const textPanelHeaderEl = document.getElementById('textPanelHeader');
+const textPanelSummaryEl = document.getElementById('textPanelSummary');
+const calibrationEntryEl = document.getElementById('calibrationEntry');
+const calPanelSummaryEl = document.getElementById('calPanelSummary');
+const readStepEl = document.getElementById('readStep');
+const readHintEl = document.getElementById('readHint');
+
+// Moves the .step-glow cue (same gradient-border shimmer as the camera
+// frame, see index.html's CSS comment) onto exactly one element at a time —
+// whichever step the person hasn't finished yet.
+function setStepGlow(activeEl) {
+  [textInputPanelEl, calibrationEntryEl, readStepEl].forEach(node => {
+    if (node) node.classList.remove('step-glow');
+  });
+  if (activeEl) activeEl.classList.add('step-glow');
+}
+
+// Single reconciliation point, called after every state change that could
+// affect "what's the next step" — text loaded/cleared, calibration
+// started/finished/cancelled/failed, camera granted. Only touches summaries,
+// dots, and the glow cue; panel expand/collapse for the text accordion is
+// driven explicitly at the actual load-text transition (see setCurrentText
+// below), so this function can be called defensively elsewhere without
+// fighting a manual expand/collapse the person just did.
+function updateProgressUI() {
+  const textDone = hasLoadedText();
+  const calDone = hasCustomCalibration;
+
+  if (textDone) {
+    const n = wordCount(currentText);
+    textPanelSummaryEl.textContent = `${n} word${n === 1 ? '' : 's'} loaded ✓`;
+    textPanelSummaryEl.classList.add('ok');
+  } else {
+    textPanelSummaryEl.textContent = '';
+    textPanelSummaryEl.classList.remove('ok');
+  }
+
+  if (!textDone) {
+    calPanelSummaryEl.textContent = 'Add your text first';
+    calPanelSummaryEl.classList.remove('ok');
+  } else if (calDone) {
+    calPanelSummaryEl.textContent = `Calibrated ✓ · ${PERSONALIZED_RATE.toFixed(2)}x`;
+    calPanelSummaryEl.classList.add('ok');
+  } else if (calibration && calibration.active) {
+    calPanelSummaryEl.textContent = 'Calibrating…';
+    calPanelSummaryEl.classList.remove('ok');
+  } else {
+    calPanelSummaryEl.textContent = 'Not calibrated yet';
+    calPanelSummaryEl.classList.remove('ok');
+  }
+
+  if (textDone && calDone) {
+    readHintEl.textContent = 'Ready when you are';
+  } else if (!textDone) {
+    readHintEl.textContent = 'Add text and calibrate to unlock this';
+  } else {
+    readHintEl.textContent = 'Calibrate to unlock this';
+  }
+
+  [pStepTextEl, pStepCalEl, pStepReadEl].forEach(el => el.classList.remove('active', 'done'));
+  pLine1El.classList.remove('done');
+  pLine2El.classList.remove('done');
+
+  if (!textDone) {
+    pStepTextEl.classList.add('active');
+    setStepGlow(textInputPanelEl);
+  } else if (!calDone) {
+    pStepTextEl.classList.add('done');
+    pStepCalEl.classList.add('active');
+    pLine1El.classList.add('done');
+    setStepGlow(calibrationEntryEl);
+  } else {
+    pStepTextEl.classList.add('done');
+    pStepCalEl.classList.add('done');
+    pStepReadEl.classList.add('active');
+    pLine1El.classList.add('done');
+    pLine2El.classList.add('done');
+    setStepGlow(readStepEl);
+  }
+}
+
+// Manual expand/collapse for the text accordion — always available
+// regardless of state, same "collapsible, never locked" pattern as the
+// Entry 45 warning box, so a completed step can still be reopened to edit.
+if (textPanelHeaderEl) {
+  textPanelHeaderEl.addEventListener('click', () => {
+    textInputPanelEl.classList.toggle('expanded');
+  });
+}
+
+// UI cleanup pass, round 2: settings + debug as fixed corner widgets,
+// reusing the exact toggle/[hidden]-panel/aria-expanded pattern the Entry 51
+// feedback widget already established (see openFeedbackPanel/
+// closeFeedbackPanel further down) rather than inventing a second
+// mechanism — same reasoning as reusing .step-glow instead of a new cue.
+const settingsToggleBtn = document.getElementById('settingsToggleBtn');
+const settingsPanelEl = document.getElementById('settingsPanel');
+const settingsCloseBtn = document.getElementById('settingsCloseBtn');
+
+function openSettingsPanel() {
+  settingsPanelEl.hidden = false;
+  settingsToggleBtn.setAttribute('aria-expanded', 'true');
+}
+function closeSettingsPanel() {
+  settingsPanelEl.hidden = true;
+  settingsToggleBtn.setAttribute('aria-expanded', 'false');
+}
+settingsToggleBtn.addEventListener('click', () => {
+  if (settingsPanelEl.hidden) openSettingsPanel(); else closeSettingsPanel();
+});
+settingsCloseBtn.addEventListener('click', closeSettingsPanel);
+
+const debugToggleBtn = document.getElementById('debugToggleBtn');
+const debugPanelEl = document.getElementById('debugPanel');
+const debugCloseBtn = document.getElementById('debugCloseBtn');
+
+function openDebugPanel() {
+  debugPanelEl.hidden = false;
+  debugToggleBtn.setAttribute('aria-expanded', 'true');
+}
+function closeDebugPanel() {
+  debugPanelEl.hidden = true;
+  debugToggleBtn.setAttribute('aria-expanded', 'false');
+}
+debugToggleBtn.addEventListener('click', () => {
+  if (debugPanelEl.hidden) openDebugPanel(); else closeDebugPanel();
+});
+debugCloseBtn.addEventListener('click', closeDebugPanel);
+
 // Single entry point for adopting new reading text, whether from the Load
 // Text button, a restored localStorage session, or (future) 10d's PDF
 // extraction. Hard-stops any in-progress reading session first — loading new
@@ -1900,6 +2242,13 @@ function setCurrentText(text, sourceLabel, opts = {}) {
   textLoadStatusEl.textContent = `Loaded: ${sourceLabel} (${n} word${n === 1 ? '' : 's'}).`;
 
   updateStartButtonState();
+
+  // UI cleanup pass: text is the "done" step now — collapse its panel to a
+  // summary line and hand the .step-glow cue to whichever step is next.
+  // Applies uniformly whether this came from a real load-text click, a
+  // restored session, or PDF extraction, since they all funnel through here.
+  textInputPanelEl.classList.remove('expanded');
+  updateProgressUI();
 
   if (persist) {
     idbSetText({
@@ -3006,6 +3355,14 @@ async function setup() {
   loadSavedCalibration();
   await loadSavedText();
 
+  // UI cleanup pass: covers the case neither loadSavedCalibration() nor
+  // loadSavedText() had anything to restore (a genuine first-time visitor)
+  // — those two already call updateProgressUI() themselves via
+  // applyCalibration()/setCurrentText() when they DO find something, so
+  // this is only a no-op double-call in the returning-visitor case, not
+  // duplicated state.
+  updateProgressUI();
+
   // Entry 53: startWebcam() used to be called right here, unconditionally,
   // the moment MediaPipe finished loading — meaning the native camera
   // permission prompt could interrupt a visitor before they'd read a single
@@ -3071,6 +3428,7 @@ function setCameraGateResolved() {
   cameraPreviewNote.style.display = '';
   updateCalibrateButtonState();
   updateStartButtonState();
+  updateProgressUI();
 }
 
 cameraGateBtn.addEventListener('click', requestCameraAccess);
@@ -3376,7 +3734,7 @@ tourSkipBtn.addEventListener('click', () => {
 const MAIN_APP_TOUR_STEPS = [
   {
     title: 'Welcome to Mumblew 👋',
-    body: 'Mumblew reads text aloud, paced by your own quiet mouth movement instead of buttons or timers. This quick guide covers the basics — takes about a minute.'
+    body: 'A quick, one-minute tour of the basics.'
   },
   {
     // Entry 53: targets the always-visible wrapper (#cameraTrustBlock),
@@ -3385,41 +3743,41 @@ const MAIN_APP_TOUR_STEPS = [
     // a hidden, zero-size element if run before then.
     targetId: 'cameraTrustBlock',
     title: 'Your camera stays private',
-    body: 'Camera video is processed entirely on your device and is never uploaded, recorded, or sent anywhere — you can even go offline once the app is running and it keeps working the same.'
+    body: "Video is processed on your device only — it's never uploaded or saved."
   },
   {
     title: 'Best on a laptop or desktop',
-    body: "Mumblew works best on a laptop or desktop browser right now. Mobile support is still being finished, so tracking may be unreliable on a phone — for the best experience, use a computer."
+    body: 'Mobile support is still being finished — for now, use a computer.'
   },
   {
     targetId: 'textInputPanel',
     title: 'Add something to read',
-    body: 'Paste or type text here, or upload a .txt or .pdf file.'
+    body: 'Paste text, or upload a .txt or .pdf.'
   },
   {
     targetId: 'calibrateBtn',
-    title: 'Calibrate (one-time setup)',
-    body: 'A quick ~15-second setup that teaches the app your own mouth movements and reading pace. Only needs to be done once per device.'
+    title: 'Calibrate (one-time)',
+    body: 'A quick ~15-second setup, tuned to how you move your mouth.'
   },
   {
     targetId: 'startBtn',
     title: 'Start Reading',
-    body: "Once you've calibrated and loaded some text, tap here. The app reads aloud for as long as your mouth is moving, and pauses when it stops."
+    body: 'Reads aloud while your mouth moves, pauses when it stops.'
   },
   {
     targetId: 'speechSwitchBtn',
     title: 'Pause / resume anytime',
-    body: 'Click this switch, or just press Spacebar, to pause or resume reading anytime — no need to touch your mouth to do it.'
+    body: 'Click, or press Spacebar — no mouth movement needed.'
   },
   {
     targetId: 'readingControls',
     title: 'Heads-up messages',
-    body: "If something's off — low light, can't see your face, and so on — a plain-English note appears in this corner, so you always know why reading paused."
+    body: "A plain-English note shows up here if something's off, like low light."
   },
   {
     targetId: 'readingText',
     title: 'Jump to any word',
-    body: 'Once text is loaded, tap any word directly to jump the narration straight to it.'
+    body: 'Tap a word to jump the narration straight to it.'
   }
 ];
 
@@ -3431,16 +3789,16 @@ const MAIN_APP_TOUR_STEPS = [
 const CALIBRATION_INTRO_STEPS = [
   {
     title: "Let's set up calibration",
-    body: 'This teaches Mumblew your own mouth movements and reading pace, so tracking fits you specifically. Takes about 15 seconds, and only needs to happen once per device.'
+    body: 'Tunes Mumblew to your mouth movement and pace — about 15 seconds, once per device.'
   },
   {
     targetId: 'container',
     title: "You'll see yourself here",
-    body: "Your camera preview shows up in this box during calibration (and only during calibration) — just to help you frame your face."
+    body: 'A camera preview, shown only during calibration, to help you frame your face.'
   },
   {
     title: 'Three quick steps',
-    body: '1) Relax your mouth naturally. 2) Silently mouth a sample sentence. 3) Pick a comfortable reading pace with a slider. Ready when you are.'
+    body: 'Relax your mouth → silently mouth a sentence → pick your pace. Ready when you are.'
   }
 ];
 

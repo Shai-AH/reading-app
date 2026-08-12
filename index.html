@@ -69,48 +69,17 @@
        Breakpoint (1040px) is set so it engages on real laptop-landscape
        widths (most laptops are 1280px+ wide) but not on a typical portrait
        tablet or a narrower/split browser window. */
+    /* UI cleanup pass, round 2: the debug panel now lives in its own
+       fixed-corner widget (see #debugWidget below), following the same
+       pattern as the Entry 51 feedback widget — so #sideColumn no longer
+       has a reason to exist and the two-column grid it justified goes with
+       it. #appLayout now just centers #mainColumn at a comfortable reading
+       width on any screen size; the calm ambient glows (see .ambient-glow)
+       are what fill the freed-up laptop-landscape margins now, not a
+       second content column. */
     #appLayout {
-      max-width: 1160px;
-      margin: 0 auto;
-    }
-    #mainColumn {
       max-width: 700px;
       margin: 0 auto;
-    }
-    #sideColumn {
-      max-width: 700px;
-      margin: 16px auto 0;
-    }
-    .side-column-label {
-      font-size: 11px;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
-      margin-bottom: 8px;
-    }
-    @media (min-width: 1040px) {
-      #appLayout {
-        display: grid;
-        grid-template-columns: minmax(0, 700px) minmax(280px, 360px);
-        gap: 40px;
-        align-items: start;
-      }
-      #mainColumn { margin: 0; }
-      #sideColumn {
-        margin: 0;
-        max-width: none;
-        position: sticky;
-        top: 24px;
-        /* Bug fix (student screenshot): without a height cap, an expanded
-           debug panel (20+ lines) is taller than the viewport, so the
-           sticky box just scrolls along as one oversized slab — you end
-           up seeing a random middle slice of it with no visible top/bottom
-           panel edges, disconnected from mainColumn beside it. Capping the
-           height and scrolling internally keeps it a proper self-contained
-           sidebar box at all times, same as any normal dashboard sidebar. */
-        max-height: calc(100vh - 48px);
-        overflow-y: auto;
-      }
     }
 
     /* Phase 10c: brand header now uses the actual logo asset (mumblew_logo.png,
@@ -133,20 +102,114 @@
     }
     #calibrationPanel { --panel-accent: var(--accent-teal); }
     #textInputPanel { --panel-accent: var(--accent-amber); }
+    #calibrationEntry { --panel-accent: var(--accent-teal); }
     #debugPanel { --panel-accent: var(--accent-pink); }
+
+    /* --- UI cleanup pass (progressive disclosure) -----------------------
+       Reorganizes the setup flow (text -> calibrate -> read) into an
+       accordion: whichever step isn't done yet stays expanded and gets a
+       visual "this is next" cue; a completed step collapses to a one-line
+       summary but is never locked — clicking its header re-expands it
+       manually, same "collapsible, not hidden" pattern as the warning box.
+       Driven from main.js's updateProgressUI(), hooked into the existing
+       single-source-of-truth points (setCurrentText, applyCalibration,
+       setCameraGateResolved) rather than new state tracking. */
+    #progressStrip {
+      display: flex; /* visible from page load — text loading doesn't require the camera gate */
+      align-items: center;
+      gap: 0;
+      margin: 4px 0 18px;
+      user-select: none;
+    }
+    .p-step { display: flex; align-items: center; gap: 8px; flex: 1; }
+    .p-dot {
+      width: 22px; height: 22px; min-width: 22px;
+      border-radius: 50%;
+      background: var(--surface);
+      border: 1.5px solid var(--border-strong);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 700; color: var(--text-muted);
+      transition: background 200ms ease, border-color 200ms ease, color 200ms ease, transform 200ms ease;
+    }
+    .p-label { font-size: 12.5px; color: var(--text-muted); font-weight: 600; white-space: nowrap; transition: color 200ms ease; }
+    .p-line { flex: 1; height: 1.5px; background: var(--border-strong); margin: 0 6px; transition: background 200ms ease; }
+    .p-step.done .p-dot { background: var(--accent-teal-dim); border-color: var(--accent-teal); color: var(--bg); }
+    .p-step.done .p-label { color: var(--text-secondary); }
+    .p-step.active .p-dot { background: var(--accent-teal); border-color: var(--accent-teal); color: var(--bg); transform: scale(1.12); }
+    .p-step.active .p-label { color: var(--text-primary); }
+    .p-line.done { background: var(--accent-teal-dim); }
+
+    .accordion-panel .panel-header {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 14px 16px; cursor: pointer;
+    }
+    .accordion-panel .panel-header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .accordion-panel .panel-icon { font-size: 16px; }
+    .accordion-panel .panel-title { font-weight: 600; }
+    .accordion-panel .panel-summary {
+      font-size: 12.5px; color: var(--text-secondary);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .accordion-panel .panel-summary.ok { color: var(--accent-teal); }
+    .accordion-panel .chevron { color: var(--text-muted); font-size: 12px; transition: transform 200ms ease; flex-shrink: 0; }
+    .accordion-panel.expanded .chevron { transform: rotate(90deg); }
+    .accordion-panel .panel-body {
+      max-height: 0; overflow: hidden; padding: 0 16px;
+      transition: max-height 260ms ease, padding 260ms ease;
+    }
+    .accordion-panel.expanded .panel-body { max-height: 480px; padding: 0 16px 16px; }
+    /* Non-clickable variant used by #calibrationEntry, which has no
+       collapsible body of its own (the real wizard panel below it already
+       manages its own display toggle) — just a status header + button. */
+    .accordion-panel.static-header .panel-header { cursor: default; }
+
+    #readStep {
+      margin-top: 18px; padding: 18px; border-radius: var(--radius);
+      border: 1px solid var(--border); background: var(--surface);
+      text-align: center; transition: border-color 200ms ease;
+    }
+    #readHint { font-size: 12.5px; color: var(--text-muted); margin-top: 8px; }
+
+    /* Calm ambient glow, wide viewports only — purely atmospheric, fills
+       the margin the mainColumn deliberately doesn't use (readability over
+       raw width, see Entry 52) without adding another information panel
+       there. Fits the app's own "read in the dark" premise: ambient light
+       in the margins, not more data to parse. Same 1040px breakpoint as
+       the rest of the wide-viewport layout. */
+    .ambient-glow {
+      display: none;
+      position: fixed; top: 50%;
+      width: 480px; height: 480px;
+      border-radius: 50%;
+      filter: blur(90px);
+      pointer-events: none;
+      z-index: 0;
+      opacity: 0.16;
+      transform: translateY(-50%);
+    }
+    #glowLeft { left: -220px; background: radial-gradient(circle, var(--accent-teal) 0%, transparent 70%); }
+    #glowRight { right: -220px; background: radial-gradient(circle, var(--accent-coral) 0%, transparent 70%); }
+    @media (min-width: 1040px) {
+      .ambient-glow { display: block; }
+    }
 
     /* Entry 53: camera gate card. Teal accent — same family as calibration,
        since both are "camera trust" moments. Sits where the old always-on
        #privacyNote used to live; hidden entirely (not just emptied) once
        camera access is granted, see setCameraGateResolved() in main.js. */
+    /* UI cleanup pass, round 2 (student screenshot): same stale leftover as
+       the #readingPane bug fixed last round — max-width: 640px dated from
+       before the accordion panels existed, sized to the old webcam box,
+       never revisited. Removed so this card lines up with the panels below
+       it exactly. */
     #cameraGateCard {
       --panel-accent: var(--accent-teal);
-      max-width: 640px;
       margin-top: 4px;
     }
     #cameraGateTip {
-      color: var(--text-secondary);
-      font-size: 14px;
+      color: var(--text-primary);
+      font-size: 15px;
+      font-weight: 600;
       line-height: 1.5;
       margin: 0 0 12px 0;
     }
@@ -212,9 +275,9 @@
     }
     input[type="range"]:focus { outline: 2px solid var(--accent-teal); outline-offset: 3px; }
     #startBtn:not(:disabled) {
-      background: var(--accent-teal-dim);
-      border-color: var(--accent-teal);
-      color: #06110D;
+      background: var(--accent-amber);
+      border-color: var(--accent-amber);
+      color: #2A1B04;
       font-weight: 600;
     }
 
@@ -265,6 +328,171 @@
       width: 640px;
       height: 480px;
     }
+
+    /* --- UI cleanup pass, round 3: on-camera calibration overlay --------
+       Sits on top of #webcam/#overlay, same absolute-fill technique. The
+       wrapper itself has pointer-events:none so it never blocks anything;
+       only the actual interactive children (buttons, slider, error retry)
+       re-enable pointer-events. Overlay's own show/hide is entirely
+       inherited from #container's .video-hidden toggle — it's only ever
+       visible when the camera box itself is, so no separate visibility
+       logic is needed here. */
+    #calibrationOverlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      pointer-events: none;
+      font-family: var(--font-sans);
+    }
+    #calibrationOverlay button,
+    #calibrationOverlay input {
+      pointer-events: auto;
+    }
+
+    .cal-intro-replay {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      pointer-events: auto;
+      font-size: 11.5px;
+      padding: 4px 10px;
+      background: rgba(22, 34, 31, 0.75);
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+    }
+    .cal-intro-replay:hover { color: var(--text-secondary); border-color: var(--accent-teal); }
+
+    /* Scrim bands: translucent dark gradient behind on-camera text, so it
+       stays legible regardless of what's actually in the video frame —
+       same technique captions use, rather than relying on plain text
+       floating directly over live footage. */
+    .cal-scrim-top {
+      padding: 16px 16px 28px;
+      text-align: center;
+      background: linear-gradient(to bottom, rgba(13,20,23,0.92), transparent);
+    }
+    .cal-step-label {
+      font-size: 17px;
+      font-weight: 800;
+      color: var(--text-primary);
+      text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+    }
+    .cal-step-sub {
+      margin-top: 4px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #D7E4E0;
+      text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+    }
+
+    .cal-countdown {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 84px;
+      font-weight: 800;
+      color: var(--accent-teal);
+      text-shadow: 0 0 28px rgba(47,191,154,0.65), 0 2px 8px rgba(0,0,0,0.6);
+    }
+
+    /* Step 2's sentence — a genuinely standout card (student feedback: it
+       needs to clearly pop out from everything else), not just text on the
+       scrim. Amber border deliberately distinct from calibration's teal
+       chrome, so it visually reads as "this is the content to say," the
+       same association #textInputPanel's amber accent already carries. */
+    .cal-sentence {
+      position: absolute;
+      left: 50%;
+      bottom: 84px;
+      transform: translateX(-50%);
+      width: calc(100% - 48px);
+      max-width: 520px;
+      background: rgba(28, 42, 39, 0.96);
+      border: 2px solid var(--accent-amber);
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      text-align: center;
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--text-primary);
+      box-shadow: 0 6px 20px rgba(0,0,0,0.55), 0 0 0 4px rgba(240,172,46,0.12);
+    }
+
+    .cal-scrim-bottom {
+      padding: 28px 16px 18px;
+      text-align: center;
+      background: linear-gradient(to top, rgba(13,20,23,0.94), transparent);
+    }
+    .cal-action-btn {
+      font-family: inherit;
+      font-size: 14.5px;
+      font-weight: 700;
+      padding: 11px 26px;
+      border-radius: 999px;
+      border: 1.5px solid var(--accent-teal);
+      background: var(--accent-teal-dim);
+      color: #eafff8;
+    }
+    .cal-action-btn:disabled {
+      opacity: 0.4;
+      border-color: var(--border-strong);
+      background: var(--surface-raised);
+      color: var(--text-muted);
+    }
+
+    .cal-rate-row { display: flex; align-items: center; gap: 10px; }
+    .cal-rate-hint { font-size: 11.5px; color: #C7D6D2; font-weight: 600; }
+    .cal-rate-actions {
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    #rateValue { font-family: monospace; font-weight: 700; color: var(--text-primary); }
+    .cal-sentence-timer {
+      font-size: 13.5px;
+      font-weight: 700;
+      color: var(--text-primary);
+      text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+    }
+
+    .cal-error-card {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 24px;
+      background: rgba(13,20,23,0.93);
+    }
+    .cal-error-icon {
+      width: 42px; height: 42px; border-radius: 50%;
+      background: var(--surface-danger); border: 1.5px solid var(--text-danger);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 19px; font-weight: 700; color: var(--text-danger);
+      margin-bottom: 12px;
+    }
+    .cal-error-title { font-size: 16px; font-weight: 700; color: var(--text-primary); max-width: 320px; }
+    .cal-error-retry {
+      margin-top: 16px;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 700;
+      padding: 10px 24px;
+      border-radius: 999px;
+      border: 1.5px solid var(--accent-coral);
+      background: var(--accent-coral);
+      color: #2A0F04;
+    }
     /* Phase 11b: ambient trouble-shading. A persistent border around the
        reading pane (NOT the per-word highlight, which resets every word)
        that drifts through red shades as a combined "trouble score" rises —
@@ -274,8 +502,14 @@
        signal doesn't rely on hue alone (colorblind accessibility, Entry 17 Q4).
        transition smooths frame-to-frame JS updates into a genuine drift rather
        than a flicker. */
+    /* UI cleanup pass, round 2 (student screenshot): this had a stale
+       max-width: 640px left over from before the accordion panels existed
+       (originally sized to match the old webcam box), never revisited once
+       #textInputPanel/#calibrationEntry/#readStep were sized to fill
+       #mainColumn's full width — so the reading pane ended up narrower and
+       out of alignment with everything above it. Removed so it matches its
+       siblings exactly. */
     #readingPane {
-      max-width: 640px;
       margin-top: 10px;
       padding: 10px;
       border-radius: 6px;
@@ -470,8 +704,8 @@
          it's actually clickable — an invitation, not an alert (that's what
          the red trouble-pulse is for), so it stays slow and low-amplitude. */
       @keyframes readyGlow {
-        0%, 100% { box-shadow: 0 0 0 0 rgba(47, 191, 154, 0); }
-        50%      { box-shadow: 0 0 10px 1px rgba(47, 191, 154, 0.35); }
+        0%, 100% { box-shadow: 0 0 0 0 rgba(240, 172, 46, 0); }
+        50%      { box-shadow: 0 0 10px 1px rgba(240, 172, 46, 0.4); }
       }
       #startBtn:not(:disabled) { animation: readyGlow 2.6s ease-in-out infinite; }
 
@@ -480,6 +714,24 @@
          motif without costing anything while hidden the rest of the time. */
       @keyframes borderShimmer { to { background-position: 0 0, 200% 0; } }
       #container:not(.video-hidden) {
+        background-size: 200% 100%, 200% 100%;
+        animation: borderShimmer 6s linear infinite;
+      }
+
+      /* UI cleanup pass: the same gradient-border + shimmer technique above,
+         generalized into a reusable "this is the next step" cue so a user
+         can tell what to do next at a glance, without reading the summary
+         text — moved between the text panel, the calibration entry, and
+         Start Reading by main.js's updateProgressUI() as each step
+         completes. Deliberately the *same* visual language as the camera
+         frame's border, not a new one, so it reads as one consistent "here's
+         where your attention goes" signal across the whole app rather than
+         two different affordances. */
+      .step-glow {
+        border: 2px solid transparent;
+        background:
+          linear-gradient(var(--surface), var(--surface)) padding-box,
+          linear-gradient(120deg, var(--accent-teal), #378ADD 35%, var(--accent-amber) 60%, var(--accent-coral) 80%, var(--accent-pink)) border-box;
         background-size: 200% 100%, 200% 100%;
         animation: borderShimmer 6s linear infinite;
       }
@@ -872,12 +1124,130 @@
       #feedbackWidget { right: 10px; bottom: 10px; }
       .feedback-panel { width: 240px; }
     }
+
+    /* --- UI cleanup pass, round 2: settings + debug as corner widgets ----
+       Same fixed-corner-tab pattern as the Entry 51 feedback widget above
+       (toggle pill + [hidden]-attribute panel), reused rather than
+       reinvented, so the page ends up with one consistent "floating corner
+       control" language instead of three different ones. Settings sits
+       top-right (an unrelated corner from feedback/debug, both bottom, so
+       nothing overlaps); debug sits bottom-left, deliberately the most
+       muted-looking of the three — low opacity, no accent color — since
+       the student is the only audience for it and it shouldn't visually
+       compete with anything a real reader would want to notice. */
+    #settingsWidget {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 500;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 8px;
+    }
+    .settings-toggle {
+      background: var(--surface-raised);
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      padding: 10px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.45);
+    }
+    .settings-toggle:hover { border-color: var(--accent-teal); }
+    .settings-panel {
+      width: 240px;
+      max-width: calc(100vw - 32px);
+      background: var(--surface-raised);
+      border: 1px solid var(--border-strong);
+      border-left: 3px solid var(--accent-teal);
+      border-radius: var(--radius);
+      padding: 14px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      font-size: 13px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .settings-panel[hidden] { display: none; }
+    .settings-panel-header {
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .settings-panel-title { font-weight: 700; color: var(--text-primary); }
+    .settings-close-btn {
+      background: transparent; border: none; color: var(--text-muted);
+      font-size: 18px; line-height: 1; padding: 0 2px;
+    }
+    .settings-close-btn:hover { color: var(--text-secondary); border-color: transparent; }
+    .settings-panel-item { display: flex; align-items: center; gap: 8px; }
+    .settings-panel-item label { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+    /* Bug fix (student screenshot): a <select> inside a flex row won't
+       actually shrink below its content's intrinsic width just because
+       max-width:100% says so — flex items default to min-width:auto, which
+       wins over that. Rather than patch around it with min-width:0 hacks,
+       the Voice row stacks instead (label above, select on its own full-
+       width line below), which sidesteps the shrink behavior entirely and
+       reads more clearly in a 240px-wide panel regardless. */
+    .settings-panel-item-stack {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 4px;
+    }
+    .settings-panel-item select {
+      width: 100%;
+    }
+
+    #debugWidget {
+      position: fixed;
+      left: 16px;
+      bottom: 16px;
+      z-index: 500;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .debug-toggle {
+      background: var(--surface-raised);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: 11.5px;
+      color: var(--text-muted);
+      opacity: 0.55;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.45);
+    }
+    .debug-toggle:hover { opacity: 1; border-color: var(--accent-pink); color: var(--text-secondary); }
+    .debug-panel-floating {
+      width: 340px;
+      max-width: calc(100vw - 32px);
+      max-height: min(70vh, 560px);
+      overflow-y: auto;
+      background: var(--surface-raised);
+      border: 1px solid var(--border-strong);
+      border-left: 3px solid var(--accent-pink);
+      border-radius: var(--radius);
+      padding: 14px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      font-size: 13px;
+    }
+    .debug-panel-floating[hidden] { display: none; }
+    .debug-panel-header {
+      display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;
+    }
+    .debug-panel-title { font-weight: 700; color: var(--text-primary); }
+    @media (max-width: 480px) {
+      #settingsWidget { top: 10px; right: 10px; }
+      .settings-panel { width: 200px; }
+      #debugWidget { left: 10px; bottom: 10px; }
+      .debug-panel-floating { width: 260px; }
+    }
   </style>
 </head>
 <body>
   <script src="gate-init.js"></script>
   <div id="mobileNoticeBanner">
-    <span>📱 Heads up — Mumblew works best on a laptop or desktop browser right now. Mobile support is still being finished, so tracking may be unreliable here. For the best experience, switch to a computer.</span>
+    <span>📱 Works best on a laptop or desktop for now — mobile support is still in progress.</span>
     <button id="mobileNoticeDismissBtn" type="button">Got it</button>
   </div>
   <!-- Entry 52: intro invite card. Replaces the old auto-play trigger —
@@ -905,12 +1275,17 @@
       </div>
     </div>
   </div>
+  <!-- UI cleanup pass: calm ambient glow, wide viewports only — see CSS
+       comment above .ambient-glow. Purely decorative (pointer-events:none),
+       so placement in the DOM doesn't matter for layout/tab order. -->
+  <div class="ambient-glow" id="glowLeft"></div>
+  <div class="ambient-glow" id="glowRight"></div>
   <div id="appLayout">
   <div id="mainColumn">
   <div class="brand">
     <img src="mumblew_logo.png" alt="Mumblew — silent read-along" style="height: 96px; width: auto; display: block;">
   </div>
-  <p class="intro-text">Mouth along with the text below — Mumblew reads it aloud at your pace, no buttons or timers needed.</p>
+  <p class="intro-text">Reads aloud, paced by your quiet mouth movement — no buttons or timers.</p>
 
   <!-- Entry 53 (camera/privacy trust messaging): replaces the old always-on
        #privacyNote + auto-fired getUserMedia() call. Previously setup() called
@@ -932,9 +1307,7 @@
   <div id="cameraTrustBlock">
     <div id="cameraGateCard" class="panel">
       <p id="cameraGateTip">
-        💡 <strong>Did you know?</strong> Once Mumblew is up and running, you can turn
-        your Wi-Fi off completely — it'll keep working exactly the same. Your camera
-        video never leaves your device, so there's nothing to send anywhere.
+        💡 Once running, this works fully offline — your camera video never leaves this device.
       </p>
       <!-- Starts disabled — enabled by setup() in main.js once MediaPipe has
            finished loading, so a click can never race ahead of it. -->
@@ -953,57 +1326,96 @@
   <div id="container" class="video-hidden">
     <video id="webcam" autoplay playsinline muted></video>
     <canvas id="overlay"></canvas>
+
+    <!-- UI cleanup pass, round 3: calibration instructions moved onto the
+         camera itself instead of a text block below it — the person is
+         already looking here, so this is what they need to read, not what
+         they need to scroll past. Scrim bands (translucent dark gradient,
+         see CSS) keep text legible regardless of what's actually in frame,
+         rather than relying on plain text sitting directly on live video. -->
+    <div id="calibrationOverlay">
+      <button id="calibrationIntroReplayBtn" type="button" class="cal-intro-replay">❓ Guide</button>
+
+      <div class="cal-scrim-top">
+        <div id="calibrationStep" class="cal-step-label"></div>
+        <div id="calibrationInstruction" class="cal-step-sub"></div>
+      </div>
+
+      <div id="calibrationCountdown" class="cal-countdown" style="display:none;"></div>
+
+      <!-- Step 2's sentence: a standout card, not floating text — student
+           feedback was specific that this needs to clearly pop out from
+           everything else on screen. Amber border deliberately distinct
+           from the teal used everywhere else in calibration chrome, so it
+           reads as "this is the content," not "this is app mechanics" —
+           same amber association #textInputPanel already carries. -->
+      <div id="calSentence" class="cal-sentence" style="display:none;"></div>
+
+      <div class="cal-scrim-bottom">
+        <button id="calActionBtn" class="cal-action-btn" style="display:none;"></button>
+        <!-- UI cleanup pass, round 3, follow-up: step 2's small "Recording…"
+             indicator, shown in place of the button once mouth-open fires —
+             the sentence itself stays visible the whole time (see calSentence
+             below), it's what the person is reading, so hiding it the moment
+             recording starts was exactly backwards. Matches the approved
+             mockup: a small timer here, not a takeover of the whole screen. -->
+        <div id="calSentenceTimer" class="cal-sentence-timer" style="display:none;"></div>
+
+        <!-- Entry 46: manual Speed step. Slider is continuous (0.5x-1.75x,
+             not discrete steps) — see PROGRESS.md Section 3 for why. Large
+             slider track + keyboard-arrow-steppable (native <input
+             type="range"> behavior) for accessibility. -->
+        <div id="rateStepPanel" style="display:none;">
+          <div class="cal-rate-row">
+            <span class="cal-rate-hint">Slower</span>
+            <input type="range" id="rateSlider" aria-label="Reading speed">
+            <span class="cal-rate-hint">Faster</span>
+          </div>
+          <div class="cal-rate-actions">
+            <span id="rateValue">1.00x</span>
+            <button id="rateTestVoiceBtn" type="button">&#9654; Test</button>
+            <button id="rateFinishBtn" type="button">Set speed</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- UI cleanup pass, round 3 (student nudge): short, plain-English
+           error card with an icon and an on-camera retry — replaces raw red
+           text sitting below the video. -->
+      <div id="calErrorCard" class="cal-error-card" style="display:none;">
+        <div class="cal-error-icon">!</div>
+        <div id="calibrationMessage" class="cal-error-title"></div>
+        <button id="calibrationRetryBtn" class="cal-error-retry" style="display:none;">Try again</button>
+      </div>
+    </div>
   </div>
   <p id="cameraPreviewNote" class="intro-text" style="margin-top: 6px; font-size: 12px; display: none;">Camera preview appears only during calibration — hidden the rest of the time.</p>
 
-  <div id="controls" style="margin-top: 12px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
-    <button id="startBtn" disabled>Start Reading</button>
-    <!-- Entry 53: now starts disabled — previously had no disabled attribute
-         at all, so it was technically clickable before the camera was even
-         requested (startCalibration() assumes video.srcObject is already
-         set). Re-enabled in setCameraGateResolved() once access is granted. -->
-    <button id="calibrateBtn" disabled>Calibrate</button>
-    <button id="helpTourBtn" type="button" title="Show the app guide again">❓ Guide</button>
-    <button id="introReplayBtn" type="button" title="Watch the intro story again">▶ Replay Intro</button>
-    <label style="display: flex; align-items: center; gap: 6px;">
-      <input type="checkbox" id="toneToggle">
-      Emotional tone (experimental)
-    </label>
-    <label style="display: flex; align-items: center; gap: 6px;">
-      Voice
-      <select id="voiceSelect" style="max-width: 220px;">
-        <option value="">Browser default</option>
-      </select>
-    </label>
-  </div>
-
-  <div id="calibrationPanel" class="panel" style="display:none; margin-top: 10px;">
-    <button id="calibrationIntroReplayBtn" type="button"
-      style="font-size: 12px; padding: 3px 8px; background: transparent; color: var(--text-muted); border-color: var(--border); margin-bottom: 8px;">
-      ❓ Show intro again
-    </button>
-    <div id="calibrationStep" style="font-weight: 600;"></div>
-    <div id="calibrationInstruction" style="margin-top: 6px; color: var(--text-secondary);"></div>
-    <div id="calibrationCountdown" style="margin-top: 6px; font-family: monospace;"></div>
-    <!-- Entry 46: manual Speed step. Slider is continuous (0.5x-1.75x, not
-         discrete steps) — see PROGRESS.md Section 3 for why. Large slider
-         track + keyboard-arrow-steppable (native <input type="range">
-         behavior) for accessibility; big tap target on the thumb via CSS. -->
-    <div id="rateStepPanel" style="display:none; margin-top: 10px;">
-      <div style="display: flex; align-items: center; gap: 10px;">
-        <span class="intro-text" style="font-size: 12px;">Slower</span>
-        <input type="range" id="rateSlider" style="flex: 1;" aria-label="Reading speed">
-        <span class="intro-text" style="font-size: 12px;">Faster</span>
-      </div>
-      <div style="margin-top: 6px; display: flex; align-items: center; gap: 12px;">
-        <span id="rateValue" style="font-family: monospace; font-weight: 600;">1.00x</span>
-        <button id="rateTestVoiceBtn" type="button">&#9654; Test voice</button>
-        <button id="rateFinishBtn" type="button">Set speed</button>
-      </div>
+  <!-- UI cleanup pass (progressive disclosure): the setup flow — text,
+       calibrate, read — as a 3-dot progress strip + accordion. Whichever
+       step isn't done stays expanded and carries the .step-glow cue (see
+       CSS, same gradient-border shimmer as the camera frame); a completed
+       step collapses to a one-line summary but stays clickable to reopen.
+       Driven entirely by main.js's updateProgressUI(), hooked into the
+       existing state functions (setCurrentText, applyCalibration) — no new
+       state tracking beyond that. Secondary controls (tone/voice/guide/
+       replay) moved into a closed-by-default Settings disclosure below,
+       since they're set-once-or-rarely-touched, not part of the core loop. -->
+  <div id="progressStrip">
+    <div class="p-step" id="pStepText">
+      <div class="p-dot">1</div>
+      <div class="p-label">Text</div>
     </div>
-    <div id="calibrationMessage" style="margin-top: 6px; color: var(--text-danger);"></div>
-    <button id="calibrationCancelBtn" style="margin-top: 8px;">Cancel</button>
-    <button id="calibrationRetryBtn" style="margin-top: 8px; display:none;">Retry</button>
+    <div class="p-line" id="pLine1"></div>
+    <div class="p-step" id="pStepCal">
+      <div class="p-dot">2</div>
+      <div class="p-label">Calibrate</div>
+    </div>
+    <div class="p-line" id="pLine2"></div>
+    <div class="p-step" id="pStepRead">
+      <div class="p-dot">3</div>
+      <div class="p-label">Read</div>
+    </div>
   </div>
 
   <!-- Phase 10a: text input, themed as of Phase 10c. The textarea is the
@@ -1012,18 +1424,54 @@
        box, then click "Load Text" either way. Keeping one load action for
        both paths avoids two divergent code paths and lets the student
        review/edit an uploaded file's text before committing it. -->
-  <div id="textInputPanel" class="panel" style="margin-top: 10px;">
-    <div style="font-weight: 600;">Reading text</div>
-    <textarea id="textInputArea" rows="4"
-      style="width: 100%; margin-top: 6px; font-size: 14px; resize: none; overflow-y: hidden;"
-      placeholder="Type or paste text here to test the app, or upload a .txt or .pdf file below..."></textarea>
-    <div style="margin-top: 6px; display: flex; align-items: center; gap: 8px;">
-      <input type="file" id="txtFileInput" accept=".txt,.pdf">
-      <button id="loadTextBtn">Load Text</button>
+  <div id="textInputPanel" class="panel accordion-panel expanded" style="margin-top: 10px;">
+    <div class="panel-header" id="textPanelHeader">
+      <div class="panel-header-left">
+        <span class="panel-icon">📄</span>
+        <span class="panel-title">Reading text</span>
+        <span class="panel-summary" id="textPanelSummary"></span>
+      </div>
+      <span class="chevron">▸</span>
     </div>
-    <div id="textLoadStatus" class="intro-text" style="margin-top: 6px;">
-      No text loaded yet — type/paste above or upload a .txt/.pdf file, then click Load Text.
+    <div class="panel-body">
+      <textarea id="textInputArea" rows="4"
+        style="width: 100%; font-size: 14px; resize: none; overflow-y: hidden;"
+        placeholder="Paste or type text, or upload a .txt/.pdf below…"></textarea>
+      <div style="margin-top: 6px; display: flex; align-items: center; gap: 8px;">
+        <input type="file" id="txtFileInput" accept=".txt,.pdf">
+        <button id="loadTextBtn">Load Text</button>
+      </div>
+      <div id="textLoadStatus" class="intro-text" style="margin-top: 6px;">
+        Add text above, then click Load Text.
+      </div>
     </div>
+  </div>
+
+  <!-- Always-visible status header for the calibration step — distinct from
+       #calibrationPanel below, which is the real 3-step wizard and keeps its
+       own existing display:none/'block' toggle (startCalibration/
+       finishCalibration) completely unchanged. This header just gives the
+       step a presence in the accordion (summary + the .step-glow cue) even
+       while the wizard itself isn't running. No expand/collapse of its own —
+       .static-header — since there's nothing here to hide. -->
+  <div id="calibrationEntry" class="panel accordion-panel static-header" style="margin-top: 10px;">
+    <div class="panel-header">
+      <div class="panel-header-left">
+        <span class="panel-icon">🎥</span>
+        <span class="panel-title">Calibration</span>
+        <span class="panel-summary" id="calPanelSummary">Add your text first</span>
+      </div>
+      <button id="calibrateBtn" disabled>Calibrate</button>
+    </div>
+  </div>
+
+  <div id="calibrationPanel" class="panel" style="display:none; margin-top: 10px; text-align: center;">
+    <button id="calibrationCancelBtn" style="font-size: 13px; color: var(--text-muted); background: transparent;">Cancel calibration</button>
+  </div>
+
+  <div id="readStep">
+    <button id="startBtn" disabled>Start Reading</button>
+    <div id="readHint">Add text and calibrate to unlock this</div>
   </div>
 
   <div id="readingPane">
@@ -1044,48 +1492,6 @@
   </div>
   </div>
 
-  <div id="sideColumn">
-    <div class="side-column-label">Developer tools</div>
-    <details id="debugPanel" class="panel">
-      <summary>Debug panel</summary>
-      <div class="debug-body" style="font-family: monospace; font-size: 14px; color: var(--text-secondary);">
-        <div>MAR: <span id="marValue">-</span></div>
-        <div>Mouth state: <span id="mouthState">-</span></div>
-        <div>Speech state: <span id="speechState">-</span></div>
-        <div>Face detection: <span id="facingState">face detected</span></div>
-        <div>Brightness (0-255, higher = brighter): <span id="brightnessValue">-</span> — <span id="lowLightDebugValue">ok</span></div>
-        <div>Light calibration baseline: <span id="lightBaselineValue">using default fallback (calibrate to personalize)</span></div>
-        <div>Manual switch: <span id="switchDebugValue">on</span></div>
-        <div>Warning box reason: <span id="warningDebugValue">none</span></div>
-        <div>Movement range: <span id="movementRangeValue">-</span></div>
-        <div>Cadence (elapsed/expected): <span id="cadenceValue">-</span></div>
-        <div>Calibration: <span id="calibrationStatusValue">using default thresholds</span></div>
-        <div>Speed calibration: <span id="speedCalibrationValue">using default pacing (calibrate to personalize)</span></div>
-        <div>Tone: <span id="toneValue">off</span></div>
-        <div>Voice: <span id="voiceValue">browser default</span></div>
-        <div>Trouble score: <span id="troubleValue">0.00</span></div>
-        <div>Word boundary events (this utterance): <span id="boundaryCountValue">0</span></div>
-        <div>Last onboundary: <span id="lastBoundaryAgoValue">-</span>ms ago</div>
-        <div>Fallback highlight advances (this utterance, no real onboundary): <span id="fallbackAdvanceCountValue">0</span></div>
-        <div>Fallback rate factor (measured, self-calibrating): <span id="fallbackRateFactorValue">1.000</span></div>
-        <div style="margin-top: 4px;">
-          <label style="display: flex; align-items: center; gap: 6px; font-size: 14px;">
-            <input type="checkbox" id="debugSimulateNoBoundary">
-            Simulate mobile (ignore real onboundary events) — desktop test toggle
-          </label>
-        </div>
-        <div>Speed fit (raw): <span id="rateFitDebugValue">-</span></div>
-        <div>Detection gap (last close): <span id="detectionGapValue">-</span></div>
-        <div>Cancel-to-actual-stop gap (last close): <span id="cancelStopGapValue">-</span></div>
-        <div>Last word / gap since prev boundary: <span id="lastWordTextValue">-</span> / <span id="lastWordGapValue">-</span> (prev word expected <span id="lastWordExpectedValue">-</span>)</div>
-        <div>Duplicate boundary events (this utterance): <span id="duplicateBoundaryValue">0</span></div>
-        <div>Early-close detections (this utterance): <span id="earlyCloseValue">0</span></div>
-        <div>Last close: in risky window: <span id="lastCloseInRiskyWindowValue">-</span> (nearest risky delta: <span id="lastCloseRiskyDeltaValue">-</span>)</div>
-        <div>speak() calls this browser session (not per-utterance): <span id="sessionSpeakCountValue">0</span></div>
-        <div>TTS iframe recycles this session (Phase 9a-iframe experiment): <span id="ttsRecycleCountValue">0</span></div>
-      </div>
-    </details>
-  </div>
   </div>
 
   <!-- Entry 52: intro sequence. 8-panel illustrated problem/solution story,
@@ -1160,6 +1566,94 @@
       </div>
       <div id="feedbackThanksView" class="feedback-thanks" hidden>
         🎉 Thanks — this really helps.
+      </div>
+    </div>
+  </div>
+
+  <!-- UI cleanup pass, round 2: settings moved out of the main flow into a
+       fixed corner widget (top-right), same toggle+[hidden]-panel pattern
+       as #feedbackWidget above, so it reads clearly as an interactive
+       control rather than plain inline text. -->
+  <div id="settingsWidget">
+    <button id="settingsToggleBtn" class="settings-toggle" type="button" aria-expanded="false" aria-controls="settingsPanel">
+      ⚙ Settings
+    </button>
+    <div id="settingsPanel" class="settings-panel" hidden>
+      <div class="settings-panel-header">
+        <span class="settings-panel-title">Settings</span>
+        <button id="settingsCloseBtn" class="settings-close-btn" type="button" aria-label="Close settings">&times;</button>
+      </div>
+      <div class="settings-panel-item">
+        <button id="helpTourBtn" type="button" title="Show the app guide again">❓ Guide</button>
+        <button id="introReplayBtn" type="button" title="Watch the intro story again">▶ Replay Intro</button>
+      </div>
+      <div class="settings-panel-item">
+        <label>
+          <input type="checkbox" id="toneToggle">
+          Emotional tone (experimental)
+        </label>
+      </div>
+      <div class="settings-panel-item settings-panel-item-stack">
+        <label for="voiceSelect">Voice</label>
+        <select id="voiceSelect">
+          <option value="">Browser default</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- UI cleanup pass, round 2: debug panel pulled out of the page flow
+       entirely into its own fixed corner widget (bottom-left, opposite
+       feedback) — same pattern again, but deliberately the most muted-
+       looking of the three (see .debug-toggle's CSS comment), since the
+       student is the only real audience for it. All the actual debug
+       content/IDs below are unchanged from the old #debugPanel — main.js
+       never referenced the wrapper itself, only these inner spans, so
+       relocating it doesn't touch any JS. -->
+  <div id="debugWidget">
+    <button id="debugToggleBtn" class="debug-toggle" type="button" aria-expanded="false" aria-controls="debugPanel">
+      Debug
+    </button>
+    <div id="debugPanel" class="debug-panel-floating" hidden>
+      <div class="debug-panel-header">
+        <span class="debug-panel-title">Debug panel</span>
+        <button id="debugCloseBtn" class="settings-close-btn" type="button" aria-label="Close debug panel">&times;</button>
+      </div>
+      <div class="debug-body" style="font-family: monospace; font-size: 13px; color: var(--text-secondary);">
+        <div>MAR: <span id="marValue">-</span></div>
+        <div>Mouth state: <span id="mouthState">-</span></div>
+        <div>Speech state: <span id="speechState">-</span></div>
+        <div>Face detection: <span id="facingState">face detected</span></div>
+        <div>Brightness (0-255, higher = brighter): <span id="brightnessValue">-</span> — <span id="lowLightDebugValue">ok</span></div>
+        <div>Light calibration baseline: <span id="lightBaselineValue">using default fallback (calibrate to personalize)</span></div>
+        <div>Manual switch: <span id="switchDebugValue">on</span></div>
+        <div>Warning box reason: <span id="warningDebugValue">none</span></div>
+        <div>Movement range: <span id="movementRangeValue">-</span></div>
+        <div>Cadence (elapsed/expected): <span id="cadenceValue">-</span></div>
+        <div>Calibration: <span id="calibrationStatusValue">using default thresholds</span></div>
+        <div>Speed calibration: <span id="speedCalibrationValue">using default pacing (calibrate to personalize)</span></div>
+        <div>Tone: <span id="toneValue">off</span></div>
+        <div>Voice: <span id="voiceValue">browser default</span></div>
+        <div>Trouble score: <span id="troubleValue">0.00</span></div>
+        <div>Word boundary events (this utterance): <span id="boundaryCountValue">0</span></div>
+        <div>Last onboundary: <span id="lastBoundaryAgoValue">-</span>ms ago</div>
+        <div>Fallback highlight advances (this utterance, no real onboundary): <span id="fallbackAdvanceCountValue">0</span></div>
+        <div>Fallback rate factor (measured, self-calibrating): <span id="fallbackRateFactorValue">1.000</span></div>
+        <div style="margin-top: 4px;">
+          <label style="display: flex; align-items: center; gap: 6px; font-size: 13px;">
+            <input type="checkbox" id="debugSimulateNoBoundary">
+            Simulate mobile (ignore real onboundary events) — desktop test toggle
+          </label>
+        </div>
+        <div>Speed fit (raw): <span id="rateFitDebugValue">-</span></div>
+        <div>Detection gap (last close): <span id="detectionGapValue">-</span></div>
+        <div>Cancel-to-actual-stop gap (last close): <span id="cancelStopGapValue">-</span></div>
+        <div>Last word / gap since prev boundary: <span id="lastWordTextValue">-</span> / <span id="lastWordGapValue">-</span> (prev word expected <span id="lastWordExpectedValue">-</span>)</div>
+        <div>Duplicate boundary events (this utterance): <span id="duplicateBoundaryValue">0</span></div>
+        <div>Early-close detections (this utterance): <span id="earlyCloseValue">0</span></div>
+        <div>Last close: in risky window: <span id="lastCloseInRiskyWindowValue">-</span> (nearest risky delta: <span id="lastCloseRiskyDeltaValue">-</span>)</div>
+        <div>speak() calls this browser session (not per-utterance): <span id="sessionSpeakCountValue">0</span></div>
+        <div>TTS iframe recycles this session (Phase 9a-iframe experiment): <span id="ttsRecycleCountValue">0</span></div>
       </div>
     </div>
   </div>
