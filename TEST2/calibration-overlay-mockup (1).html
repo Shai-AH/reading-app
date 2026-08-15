@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mumblew — on-camera calibration mockup v2</title>
+<style>
+  :root {
+    --bg: #0D1417;
+    --surface: #16221F;
+    --surface-raised: #1C2A27;
+    --border: #26363A;
+    --border-strong: #35494E;
+    --text-primary: #EDEDE8;
+    --text-secondary: #9AA6A3;
+    --text-muted: #6C7876;
+    --accent-teal: #2FBF9A;
+    --accent-teal-dim: #1F8A6E;
+    --accent-amber: #F0AC2E;
+    --accent-coral: #E8752E;
+    --accent-pink: #C93C7A;
+    --text-danger: #FF6B6B;
+    --surface-danger: #33191C;
+    --radius: 10px;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); color: var(--text-primary); font-family: var(--font-sans); margin: 0; }
+  #frame { max-width: 640px; margin: 0 auto; padding: 28px 20px 80px; }
+
+  #metaBanner {
+    background: var(--surface-raised); border: 1px dashed var(--border-strong);
+    border-radius: var(--radius); padding: 10px 14px; font-size: 12.5px;
+    color: var(--text-secondary); margin-bottom: 20px; line-height: 1.5;
+  }
+  #metaBanner b { color: var(--text-primary); }
+
+  .tabs { display: flex; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; }
+  .tab {
+    font-size: 13px; font-weight: 600; padding: 8px 14px;
+    border-radius: 999px; border: 1px solid var(--border-strong);
+    background: var(--surface-raised); color: var(--text-secondary); cursor: pointer;
+  }
+  .tab.active { border-color: var(--accent-teal); color: var(--text-primary); background: var(--accent-teal-dim); }
+
+  #cameraBox {
+    position: relative; width: 100%; aspect-ratio: 4 / 3;
+    border-radius: 12px; overflow: hidden; border: 2px solid transparent;
+    background:
+      linear-gradient(var(--surface), var(--surface)) padding-box,
+      linear-gradient(120deg, var(--accent-teal), #378ADD 35%, var(--accent-amber) 60%, var(--accent-coral) 80%, var(--accent-pink)) border-box;
+  }
+  #fakeVideo {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(circle at 50% 38%, rgba(255,214,170,0.22), transparent 42%),
+      linear-gradient(160deg, #2b241f, #1a1613 60%, #100e0c);
+  }
+  #fakeFace {
+    position: absolute; left: 50%; top: 38%; transform: translate(-50%, -50%);
+    width: 130px; height: 160px; border-radius: 50% 50% 46% 46%;
+    background: linear-gradient(160deg, #d9a679, #b9825a); opacity: 0.85;
+  }
+
+  .scrim-top, .scrim-bottom {
+    position: absolute; left: 0; right: 0; display: flex; flex-direction: column;
+    align-items: center; padding: 14px 16px; text-align: center;
+  }
+  .scrim-top { top: 0; background: linear-gradient(to bottom, rgba(13,20,23,0.9), transparent); }
+  .scrim-bottom { bottom: 0; background: linear-gradient(to top, rgba(13,20,23,0.92), transparent); padding-top: 30px; }
+
+  .step-icon {
+    width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; background: var(--surface-raised); border: 1.5px solid var(--accent-teal);
+    font-size: 16px; margin-bottom: 8px;
+  }
+  .step-label { font-size: 15px; font-weight: 700; color: var(--text-primary); }
+  .step-sub { font-size: 12.5px; color: var(--text-secondary); margin-top: 2px; }
+
+  .countdown-big {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 72px; font-weight: 700; color: var(--accent-teal);
+    text-shadow: 0 0 24px rgba(47,191,154,0.6);
+  }
+
+  .sim-btn {
+    margin-top: 14px; width: 100%; font-family: inherit; font-size: 13.5px; font-weight: 600;
+    padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border-strong);
+    background: var(--surface-raised); color: var(--text-primary); cursor: pointer;
+  }
+  .sim-btn:hover:not(:disabled) { border-color: var(--accent-teal); }
+  .sim-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* on-camera "press when ready" action buttons — sit inside the scrim,
+     not below the video, so both the cue and the confirmation live in the
+     same place the person is already looking */
+  .onvid-btn {
+    margin-top: 10px; font-family: inherit; font-size: 13.5px; font-weight: 700;
+    padding: 9px 20px; border-radius: 999px; border: 1.5px solid var(--accent-teal);
+    background: var(--accent-teal-dim); color: #eafff8; cursor: pointer;
+  }
+  .onvid-btn:disabled { opacity: 0.35; cursor: not-allowed; border-color: var(--border-strong); background: var(--surface-raised); color: var(--text-muted); }
+
+  /* Step 2's sentence — now ON the camera (bottom scrim), positioned below
+     the face rather than a separate card underneath the whole box */
+  .sentence-text {
+    font-size: 16px; font-weight: 700; color: var(--text-primary);
+    max-width: 90%; line-height: 1.35;
+  }
+  #sentenceTimer2 { margin-top: 6px; font-size: 12.5px; color: var(--text-muted); }
+
+  .rate-row { display: flex; align-items: center; gap: 10px; width: 100%; margin-top: 4px; }
+  .rate-row span { font-size: 12px; color: var(--text-secondary); }
+  .rate-row input[type=range] { flex: 1; }
+
+  #errorCard {
+    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    flex-direction: column; background: rgba(13,20,23,0.92); text-align: center; padding: 20px;
+  }
+  #errorCard.shown { display: flex; }
+  .error-icon {
+    width: 44px; height: 44px; border-radius: 50%; background: var(--surface-danger);
+    border: 1.5px solid var(--text-danger); display: flex; align-items: center;
+    justify-content: center; font-size: 20px; margin-bottom: 12px;
+  }
+  .error-title { font-size: 16px; font-weight: 700; color: var(--text-primary); max-width: 280px; }
+  .error-retry {
+    margin-top: 16px; font-size: 14px; font-weight: 700; padding: 10px 22px; border-radius: 999px;
+    border: 1.5px solid var(--accent-coral); background: var(--accent-coral); color: #2A0F04; cursor: pointer;
+  }
+
+  .note {
+    margin-top: 12px; font-size: 12px; color: var(--text-muted);
+    padding: 8px 10px; background: var(--surface); border: 1px dashed var(--border);
+    border-radius: 8px;
+  }
+</style>
+</head>
+<body>
+<div id="frame">
+
+  <div id="metaBanner">
+    <b>Mockup v2</b> — button-gated detection: stillness/mouth-open unlock a
+    button, you choose the moment. Face/video are placeholders.
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-step="1">1 · Stay still</button>
+    <button class="tab" data-step="2">2 · Mumble</button>
+    <button class="tab" data-step="3">3 · Pace</button>
+    <button class="tab" data-step="error">Error state</button>
+  </div>
+
+  <div id="cameraBox">
+    <div id="fakeVideo"><div id="fakeFace"></div></div>
+
+    <!-- STEP 1 -->
+    <div id="panel1">
+      <div class="scrim-top">
+        <div class="step-icon">◎</div>
+        <div class="step-label" id="step1Label">Stay still for a moment</div>
+        <div class="step-sub" id="step1Sub">The button below will light up when you're ready</div>
+      </div>
+      <div class="countdown-big" id="countdownEl" style="display:none;"></div>
+      <div class="scrim-bottom" id="step1BtnWrap">
+        <button class="onvid-btn" id="step1Btn" disabled>Press when ready</button>
+      </div>
+    </div>
+
+    <!-- STEP 2 -->
+    <div id="panel2" style="display:none;">
+      <div class="scrim-top">
+        <div class="step-icon">〜</div>
+        <div class="step-label" id="step2Label">Silently mumble a sentence</div>
+        <div class="step-sub" id="step2Sub">Tap below when you're ready to start</div>
+      </div>
+      <div class="scrim-bottom" id="step2BtnWrap">
+        <button class="onvid-btn" id="step2ReadyBtn">Ready to mumble?</button>
+      </div>
+    </div>
+
+    <!-- ERROR -->
+    <div id="errorCard">
+      <div class="error-icon">!</div>
+      <div class="error-title">Couldn't tell you were mumbling. Move your mouth a bit more.</div>
+      <button class="error-retry" id="retryBtn">Try again</button>
+    </div>
+  </div>
+
+  <button class="sim-btn" id="simBtn">Simulate: detected stillness</button>
+
+  <div class="note" id="reasoningNote">
+    Step 1: detection only unlocks the button — you decide the exact moment,
+    so a stray twitch can't start a countdown you weren't ready for.
+  </div>
+
+</div>
+
+<script>
+  const tabs = document.querySelectorAll('.tab');
+  const panel1 = document.getElementById('panel1');
+  const panel2 = document.getElementById('panel2');
+  const errorCard = document.getElementById('errorCard');
+  const simBtn = document.getElementById('simBtn');
+  const countdownEl = document.getElementById('countdownEl');
+  const step1Label = document.getElementById('step1Label');
+  const step1Sub = document.getElementById('step1Sub');
+  const step1Btn = document.getElementById('step1Btn');
+  const step1BtnWrap = document.getElementById('step1BtnWrap');
+  const step2Label = document.getElementById('step2Label');
+  const step2Sub = document.getElementById('step2Sub');
+  const step2ReadyBtn = document.getElementById('step2ReadyBtn');
+  const step2BtnWrap = document.getElementById('step2BtnWrap');
+  const reasoningNote = document.getElementById('reasoningNote');
+
+  const NOTES = {
+    '1': "Step 1: detection only unlocks the button — you decide the exact moment, so a stray twitch can't start a countdown you weren't ready for.",
+    '2': "Step 2: tap \u201cReady to mumble?\u201d whenever you want — the sentence then shows on-camera, and the countdown only starts once you actually open your mouth.",
+    '3': "Step 3 stays a simple on-camera slider — no detection involved.",
+    'error': "Short, plain-English error card with a retry button, right on the camera instead of red text underneath."
+  };
+
+  let currentStep = '1';
+  let simTimer = null;
+
+  function resetStep1() {
+    countdownEl.style.display = 'none';
+    step1Label.textContent = 'Stay still for a moment';
+    step1Sub.textContent = "The button below will light up when you're ready";
+    step1Btn.disabled = true;
+    step1Btn.textContent = 'Press when ready';
+    step1BtnWrap.style.display = 'flex';
+  }
+
+  function resetStep2() {
+    step2Label.textContent = 'Silently mumble a sentence';
+    step2Sub.textContent = "Tap below when you're ready to start";
+    step2BtnWrap.innerHTML = '<button class="onvid-btn" id="step2ReadyBtn">Ready to mumble?</button>';
+    document.getElementById('step2ReadyBtn').addEventListener('click', onStep2Ready);
+  }
+
+  function showStep(step) {
+    currentStep = step;
+    clearTimeout(simTimer);
+    tabs.forEach(t => t.classList.toggle('active', t.dataset.step === step));
+    [panel1, panel2, errorCard].forEach(p => p.style.display = 'none');
+    errorCard.classList.remove('shown');
+    resetStep1();
+    resetStep2();
+    reasoningNote.textContent = NOTES[step];
+
+    if (step === '1') {
+      panel1.style.display = 'block';
+      simBtn.style.display = 'block';
+      simBtn.disabled = false;
+      simBtn.textContent = 'Simulate: detected stillness';
+    } else if (step === '2') {
+      panel2.style.display = 'block';
+      simBtn.style.display = 'none';
+    } else if (step === '3') {
+      // Step 3 preview kept minimal in this pass — pace slider, no detection.
+      panel1.style.display = 'none';
+      simBtn.style.display = 'none';
+    } else if (step === 'error') {
+      panel2.style.display = 'block';
+      errorCard.style.display = 'flex';
+      errorCard.classList.add('shown');
+      simBtn.style.display = 'none';
+    }
+  }
+
+  // --- Step 1: detection unlocks the button; user presses it ---
+  simBtn.addEventListener('click', () => {
+    simBtn.disabled = true;
+    simBtn.textContent = 'Stillness detected ✓';
+    step1Btn.disabled = false;
+    step1Sub.textContent = "Ready — press below to start the countdown";
+  });
+
+  step1Btn.addEventListener('click', () => {
+    step1BtnWrap.style.display = 'none';
+    step1Label.textContent = 'Holding…';
+    step1Sub.textContent = '';
+    countdownEl.style.display = 'flex';
+    let n = 3;
+    countdownEl.textContent = n;
+    const tick = () => {
+      n -= 1;
+      if (n > 0) {
+        countdownEl.textContent = n;
+        simTimer = setTimeout(tick, 700);
+      } else {
+        countdownEl.textContent = '✓';
+        step1Label.textContent = 'Step 1 done';
+      }
+    };
+    simTimer = setTimeout(tick, 700);
+  });
+
+  // --- Step 2: "Ready to mumble?" reveals the sentence on-camera; the
+  // countdown only starts once mouth-open is simulated ---
+  function onStep2Ready() {
+    step2Label.innerHTML = '<span class="sentence-text">&ldquo;Mumblew helps people read by watching quiet mouth movements.&rdquo;</span>';
+    step2Sub.textContent = '';
+    step2BtnWrap.innerHTML = '<button class="onvid-btn" id="step2OpenBtn">Simulate: open mouth</button>';
+    document.getElementById('step2OpenBtn').addEventListener('click', onStep2MouthOpen);
+  }
+
+  function onStep2MouthOpen() {
+    step2BtnWrap.innerHTML = '<div id="sentenceTimer2" style="color:var(--text-primary); font-weight:600;">Recording… 3</div>';
+    let n = 3;
+    const el = document.getElementById('sentenceTimer2');
+    const tick = () => {
+      n -= 1;
+      if (n > 0) {
+        el.textContent = `Recording… ${n}`;
+        simTimer = setTimeout(tick, 700);
+      } else {
+        el.textContent = 'Step 2 done ✓';
+      }
+    };
+    simTimer = setTimeout(tick, 700);
+  }
+
+  document.getElementById('step2ReadyBtn').addEventListener('click', onStep2Ready);
+  document.getElementById('retryBtn').addEventListener('click', () => showStep('2'));
+  tabs.forEach(t => t.addEventListener('click', () => showStep(t.dataset.step)));
+</script>
+</body>
+</html>

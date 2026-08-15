@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mumblew — UI cleanup mockup (progressive disclosure + calm ambient)</title>
+<style>
+  :root {
+    --bg: #0D1417;
+    --surface: #16221F;
+    --surface-raised: #1C2A27;
+    --border: #26363A;
+    --border-strong: #35494E;
+    --text-primary: #EDEDE8;
+    --text-secondary: #9AA6A3;
+    --text-muted: #6C7876;
+    --accent-teal: #2FBF9A;
+    --accent-teal-dim: #1F8A6E;
+    --accent-amber: #F0AC2E;
+    --accent-coral: #E8752E;
+    --accent-pink: #C93C7A;
+    --radius: 10px;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    margin: 0;
+    padding: 0;
+    overflow-x: hidden; /* ambient glows must never cause horizontal scroll */
+  }
+
+  /* ---- ambient background glows, wide viewports only ----
+     Purely atmospheric, no information — the calm-room lighting metaphor
+     fits an app meant to be used lying down / in the dark. Two soft blurred
+     radial glows sit in the margins the mainColumn doesn't use, instead of
+     filling that space with another data panel. Fixed positioning so they
+     never affect document layout or scroll height; pointer-events:none so
+     they never intercept clicks; a very slow, low-amplitude pulse that
+     respects prefers-reduced-motion. Hidden below the breakpoint entirely
+     — on phones/tablets there's no side margin for them to occupy anyway. */
+  .ambient-glow {
+    display: none;
+    position: fixed;
+    top: 50%;
+    width: 480px;
+    height: 480px;
+    border-radius: 50%;
+    filter: blur(90px);
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0.16;
+    transform: translateY(-50%);
+  }
+  #glowLeft {
+    left: -220px;
+    background: radial-gradient(circle, var(--accent-teal) 0%, transparent 70%);
+    animation: driftLeft 14s ease-in-out infinite;
+  }
+  #glowRight {
+    right: -220px;
+    background: radial-gradient(circle, var(--accent-coral) 0%, transparent 70%);
+    animation: driftRight 16s ease-in-out infinite;
+  }
+  @keyframes driftLeft {
+    0%, 100% { transform: translateY(-54%) scale(1); opacity: 0.14; }
+    50% { transform: translateY(-46%) scale(1.08); opacity: 0.20; }
+  }
+  @keyframes driftRight {
+    0%, 100% { transform: translateY(-46%) scale(1); opacity: 0.14; }
+    50% { transform: translateY(-54%) scale(1.08); opacity: 0.20; }
+  }
+  @media (min-width: 1040px) {
+    .ambient-glow { display: block; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ambient-glow { animation: none; opacity: 0.14; }
+  }
+
+  #frame {
+    position: relative;
+    z-index: 1;
+    max-width: 700px; /* matches the real app's #mainColumn width exactly */
+    margin: 0 auto;
+    padding: 32px 20px 90px;
+  }
+
+  /* ---- mockup-only meta banner, not part of the real app ---- */
+  #metaBanner {
+    background: var(--surface-raised);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    margin-bottom: 26px;
+    line-height: 1.5;
+  }
+  #metaBanner b { color: var(--text-primary); }
+  #resetLink {
+    color: var(--accent-teal);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  h1 {
+    font-size: 20px;
+    margin: 0 0 5px;
+    letter-spacing: -0.01em;
+  }
+  #subhead {
+    color: var(--text-secondary);
+    font-size: 14px;
+    margin: 0 0 24px;
+  }
+
+  /* ---- progress strip ---- */
+  #progressStrip {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin-bottom: 28px;
+    user-select: none;
+  }
+  .p-step {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    flex: 1;
+  }
+  .p-dot {
+    width: 24px;
+    height: 24px;
+    min-width: 24px;
+    border-radius: 50%;
+    background: var(--surface);
+    border: 1.5px solid var(--border-strong);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--text-muted);
+    transition: background 200ms ease, border-color 200ms ease, color 200ms ease, transform 200ms ease;
+  }
+  .p-label {
+    font-size: 13px;
+    color: var(--text-muted);
+    font-weight: 600;
+    white-space: nowrap;
+    transition: color 200ms ease;
+  }
+  .p-line {
+    flex: 1;
+    height: 1.5px;
+    background: var(--border-strong);
+    margin: 0 6px;
+    transition: background 200ms ease;
+  }
+  .p-step.done .p-dot { background: var(--accent-teal-dim); border-color: var(--accent-teal); color: var(--bg); }
+  .p-step.done .p-label { color: var(--text-secondary); }
+  .p-step.active .p-dot { background: var(--accent-teal); border-color: var(--accent-teal); color: var(--bg); transform: scale(1.12); }
+  .p-step.active .p-label { color: var(--text-primary); }
+  .p-line.done { background: var(--accent-teal-dim); }
+
+  /* ---- accordion panels — slightly more generous sizing than before,
+     per the "bigger, not wider" direction: more internal breathing room
+     and larger touch targets, same 700px line length. ---- */
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--panel-accent, var(--border-strong));
+    border-radius: var(--radius);
+    margin-bottom: 14px;
+    overflow: hidden;
+    transition: border-left-color 200ms ease;
+  }
+  #textPanel { --panel-accent: var(--accent-amber); }
+  #calPanel { --panel-accent: var(--accent-teal); }
+
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 17px 18px;
+    cursor: pointer;
+  }
+  .panel-header-left { display: flex; align-items: center; gap: 11px; min-width: 0; }
+  .panel-icon { font-size: 18px; }
+  .panel-title { font-weight: 600; font-size: 15.5px; }
+  .panel-summary {
+    font-size: 13px;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .panel-summary.ok { color: var(--accent-teal); }
+  .chevron {
+    color: var(--text-muted);
+    font-size: 13px;
+    transition: transform 200ms ease;
+    flex-shrink: 0;
+  }
+  .panel.open .chevron { transform: rotate(90deg); }
+
+  .panel-body {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 260ms ease, padding 260ms ease;
+    padding: 0 18px;
+  }
+  .panel.open .panel-body {
+    max-height: 340px;
+    padding: 0 18px 18px;
+  }
+
+  textarea#mockTextarea {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 14.5px;
+    padding: 12px;
+    resize: none;
+    min-height: 80px;
+  }
+  .row { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+
+  .mock-slider-track {
+    flex: 1;
+    height: 4px;
+    background: var(--border-strong);
+    border-radius: 2px;
+    position: relative;
+  }
+  .mock-slider-fill {
+    position: absolute; left: 0; top: 0; bottom: 0;
+    width: 55%;
+    background: var(--accent-teal);
+    border-radius: 2px;
+  }
+  .mock-slider-thumb {
+    position: absolute; top: 50%; left: 55%;
+    width: 18px; height: 18px;
+    background: var(--accent-teal);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    box-shadow: 0 0 0 3px rgba(47,191,154,0.2);
+  }
+
+  button {
+    font-family: inherit;
+    font-size: 14.5px;
+    font-weight: 600;
+    padding: 10px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--border-strong);
+    background: var(--surface-raised);
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent-teal); }
+  button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  button:disabled:hover { border-color: var(--border-strong); }
+
+  /* ---- reading step / CTA ---- */
+  #readStep {
+    margin-top: 20px;
+    padding: 22px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    text-align: center;
+    transition: border-color 200ms ease;
+  }
+  #readStep.ready {
+    border-color: var(--accent-coral);
+    background: linear-gradient(180deg, rgba(232,117,46,0.08), transparent);
+  }
+  #startBtnMock {
+    font-size: 16px;
+    padding: 14px 32px;
+    background: var(--accent-coral);
+    border-color: var(--accent-coral);
+    color: #1a0f08;
+  }
+  #startBtnMock:disabled { background: var(--surface-raised); color: var(--text-muted); border-color: var(--border-strong); }
+  #readHint {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-top: 9px;
+  }
+
+  /* ---- settings disclosure ---- */
+  #settingsToggle {
+    margin-top: 24px;
+    font-size: 13.5px;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    user-select: none;
+  }
+  #settingsToggle:hover { color: var(--text-secondary); }
+  #settingsBody {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 220ms ease, margin 220ms ease;
+  }
+  #settingsBody.open {
+    max-height: 200px;
+    margin-top: 11px;
+  }
+  .settings-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 12px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 13.5px;
+    color: var(--text-secondary);
+  }
+  .settings-row label { display: flex; align-items: center; gap: 6px; }
+</style>
+</head>
+<body>
+
+<div class="ambient-glow" id="glowLeft"></div>
+<div class="ambient-glow" id="glowRight"></div>
+
+<div id="frame">
+
+  <div id="metaBanner">
+    <b>Mockup only</b> — static, non-functional, for feel/flow review. Real camera/TTS/calibration logic untouched.
+    Click "Load Text" then "Finish Calibration" to see the sequence. Resize your window past ~1040px to see the ambient glows.
+    <span id="resetLink" onclick="resetDemo()">↺ Reset demo</span>
+  </div>
+
+  <h1>Mumblew</h1>
+  <p id="subhead">Same screen you have today, restructured so the next step is always obvious.</p>
+
+  <div id="progressStrip">
+    <div class="p-step active" id="pStepText">
+      <div class="p-dot">1</div>
+      <div class="p-label">Text</div>
+    </div>
+    <div class="p-line" id="pLine1"></div>
+    <div class="p-step" id="pStepCal">
+      <div class="p-dot">2</div>
+      <div class="p-label">Calibrate</div>
+    </div>
+    <div class="p-line" id="pLine2"></div>
+    <div class="p-step" id="pStepRead">
+      <div class="p-dot">3</div>
+      <div class="p-label">Read</div>
+    </div>
+  </div>
+
+  <!-- TEXT PANEL -->
+  <div class="panel open" id="textPanel">
+    <div class="panel-header" onclick="togglePanel('textPanel')">
+      <div class="panel-header-left">
+        <span class="panel-icon">📄</span>
+        <span class="panel-title">Reading text</span>
+        <span class="panel-summary" id="textSummary"></span>
+      </div>
+      <span class="chevron">▸</span>
+    </div>
+    <div class="panel-body">
+      <textarea id="mockTextarea" placeholder="Type or paste text here, or upload a .txt/.pdf file below…"></textarea>
+      <div class="row">
+        <button onclick="event.stopPropagation(); loadText()">Load Text</button>
+        <span style="font-size:12.5px; color:var(--text-muted);">or choose a .txt / .pdf file</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- CALIBRATION PANEL -->
+  <div class="panel" id="calPanel">
+    <div class="panel-header" onclick="togglePanel('calPanel')">
+      <div class="panel-header-left">
+        <span class="panel-icon">🎥</span>
+        <span class="panel-title">Calibration</span>
+        <span class="panel-summary" id="calSummary">Add your text first</span>
+      </div>
+      <span class="chevron">▸</span>
+    </div>
+    <div class="panel-body">
+      <div style="font-size:13.5px; color:var(--text-secondary);">Speed</div>
+      <div class="row">
+        <span style="font-size:12.5px; color:var(--text-muted);">Slower</span>
+        <div class="mock-slider-track"><div class="mock-slider-fill"></div><div class="mock-slider-thumb"></div></div>
+        <span style="font-size:12.5px; color:var(--text-muted);">Faster</span>
+      </div>
+      <div class="row">
+        <button onclick="event.stopPropagation(); finishCalibration()">Finish Calibration</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- READ STEP -->
+  <div id="readStep">
+    <button id="startBtnMock" disabled>Start Reading</button>
+    <div id="readHint">Finish calibration to unlock this</div>
+  </div>
+
+  <div id="settingsToggle" onclick="toggleSettings()">
+    <span id="settingsChevron">▸</span> Settings — voice, tone, guide
+  </div>
+  <div id="settingsBody">
+    <div class="settings-row">
+      <label><input type="checkbox"> Emotional tone (experimental)</label>
+      <label>Voice
+        <select style="background:var(--bg); color:var(--text-primary); border:1px solid var(--border); border-radius:6px; padding:3px 6px;">
+          <option>Browser default</option>
+        </select>
+      </label>
+      <button style="padding:6px 12px; font-size:12.5px;">❓ Guide</button>
+      <button style="padding:6px 12px; font-size:12.5px;">▶ Replay Intro</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  let textDone = false;
+  let calDone = false;
+
+  function togglePanel(id) {
+    const panel = document.getElementById(id);
+    if (id === 'calPanel' && !textDone) return;
+    panel.classList.toggle('open');
+  }
+
+  function toggleSettings() {
+    const body = document.getElementById('settingsBody');
+    const chev = document.getElementById('settingsChevron');
+    body.classList.toggle('open');
+    chev.textContent = body.classList.contains('open') ? '▾' : '▸';
+  }
+
+  function loadText() {
+    const val = document.getElementById('mockTextarea').value.trim();
+    const wordCount = val ? val.split(/\s+/).length : 812;
+    textDone = true;
+
+    document.getElementById('textSummary').textContent = `${wordCount} words loaded ✓`;
+    document.getElementById('textSummary').classList.add('ok');
+    document.getElementById('textPanel').classList.remove('open');
+
+    document.getElementById('calSummary').textContent = 'Not calibrated yet';
+    document.getElementById('calPanel').classList.add('open');
+
+    setStep('cal');
+  }
+
+  function finishCalibration() {
+    calDone = true;
+    document.getElementById('calSummary').textContent = 'Calibrated ✓ · Speed 1.2x';
+    document.getElementById('calSummary').classList.add('ok');
+    document.getElementById('calPanel').classList.remove('open');
+
+    const btn = document.getElementById('startBtnMock');
+    btn.disabled = false;
+    document.getElementById('readStep').classList.add('ready');
+    document.getElementById('readHint').textContent = 'Ready when you are';
+
+    setStep('read');
+  }
+
+  function setStep(which) {
+    const textStep = document.getElementById('pStepText');
+    const calStep = document.getElementById('pStepCal');
+    const readStep = document.getElementById('pStepRead');
+    const line1 = document.getElementById('pLine1');
+    const line2 = document.getElementById('pLine2');
+
+    textStep.classList.remove('active'); textStep.classList.add('done');
+    if (which === 'cal') {
+      calStep.classList.add('active'); calStep.classList.remove('done');
+      readStep.classList.remove('active','done');
+      line1.classList.add('done'); line2.classList.remove('done');
+    } else if (which === 'read') {
+      calStep.classList.remove('active'); calStep.classList.add('done');
+      readStep.classList.add('active');
+      line1.classList.add('done'); line2.classList.add('done');
+    }
+  }
+
+  function resetDemo() {
+    textDone = false; calDone = false;
+    document.getElementById('mockTextarea').value = '';
+    document.getElementById('textSummary').textContent = '';
+    document.getElementById('textSummary').classList.remove('ok');
+    document.getElementById('textPanel').classList.add('open');
+
+    document.getElementById('calSummary').textContent = 'Add your text first';
+    document.getElementById('calSummary').classList.remove('ok');
+    document.getElementById('calPanel').classList.remove('open');
+
+    document.getElementById('startBtnMock').disabled = true;
+    document.getElementById('readStep').classList.remove('ready');
+    document.getElementById('readHint').textContent = 'Finish calibration to unlock this';
+
+    ['pStepText','pStepCal','pStepRead'].forEach(id => {
+      document.getElementById(id).classList.remove('active','done');
+    });
+    document.getElementById('pStepText').classList.add('active');
+    document.getElementById('pLine1').classList.remove('done');
+    document.getElementById('pLine2').classList.remove('done');
+
+    document.getElementById('settingsBody').classList.remove('open');
+    document.getElementById('settingsChevron').textContent = '▸';
+  }
+</script>
+</body>
+</html>

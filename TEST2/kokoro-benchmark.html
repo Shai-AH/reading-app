@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mumblew — Kokoro Benchmark (second device)</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 16px; background: #111; color: #eee; line-height: 1.5; }
+  h1 { font-size: 20px; } h2 { font-size: 16px; margin-top: 28px; border-top: 1px solid #333; padding-top: 16px; }
+  p { color: #aaa; }
+  button { padding: 8px 14px; margin: 4px 8px 4px 0; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #status { font-family: monospace; font-size: 12px; white-space: pre-wrap; background: #1a1a1a; padding: 10px; border-radius: 4px; max-height: 260px; overflow-y: auto; margin-top: 10px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 10px; }
+  th, td { border: 1px solid #444; padding: 6px 8px; text-align: left; }
+  th { background: #222; }
+  .metric { font-size: 15px; margin: 6px 0; }
+  .metric b { color: #6fce7c; }
+  .metric b.bad { color: #ff6b6b; }
+  input[type=number] { width: 90px; padding: 4px; }
+  video { display: none; }
+</style>
+</head>
+<body>
+<h1>Mumblew — Kokoro Benchmark (second device)</h1>
+<p>
+  Standalone, isolated test — doesn't touch the main app. Goal: find out whether
+  <b>this specific device</b> can run Kokoro (local TTS) fast enough to be worth
+  building, before committing any code to the main app. The model downloads
+  fresh from the Kokoro CDN on first load (~80-170MB), so this needs a real
+  internet connection.
+</p>
+
+<h2>Step 1 — Capability check</h2>
+<div id="capResult">Checking...</div>
+
+<h2>Step 2 — Load the model</h2>
+<p>Picks WebGPU/fp32 if Step 1 found WebGPU support, otherwise falls back to WASM/q8 — the two combinations the first laptop's benchmark already validated as usable (fp16 was glitchy, q4 was slower <i>and</i> degraded on that GPU backend, so neither is worth re-testing here).</p>
+<button id="loadModelBtn" disabled>Load Kokoro Model</button>
+<div id="loadResult"></div>
+
+<h2>Step 3 — Synthesis speed test</h2>
+<p>Synthesizes three sentences of increasing length, alone (no concurrent load), and measures wall-clock synth time per sentence.</p>
+<button id="speedTestBtn" disabled>Run Speed Test</button>
+<button id="playSampleBtn" disabled>Play Last Sample</button>
+<div id="speedResult"></div>
+
+<h2>Step 4 — Concurrent load test (webcam required)</h2>
+<p>Mirrors real usage: starts your webcam and runs the same MediaPipe face-tracking model the main app uses, measures its frame rate alone for a few seconds, then again <i>while</i> Kokoro is synthesizing, so we can see how much they slow each other down on this specific hardware.</p>
+<button id="concurrentTestBtn" disabled>Run Concurrent Load Test</button>
+<video id="camVideo" autoplay playsinline muted></video>
+<div id="concurrentResult"></div>
+
+<h2>Step 5 — Breakeven check</h2>
+<p>
+  Enter your real calibrated pace from the app's debug panel (shows as something like
+  "custom (1.20x rate, 210ms/syllable)" — combine with the base-word-ms value the same
+  panel shows, or estimate ~1.5 syllables/word if you only have the syllable number).
+  If you don't have it handy, your last known value (650ms/word) works as a placeholder.
+</p>
+<label>Your calibrated pace: <input type="number" id="calibratedMsPerWord" value="650"> ms/word</label>
+<button id="breakevenBtn" disabled>Check Breakeven</button>
+<div id="breakevenResult"></div>
+
+<h2>Log</h2>
+<div id="status">Starting capability check...</div>
+
+<script type="module">
+const statusEl = document.getElementById('status');
+function log(msg) {
+  const t = new Date().toLocaleTimeString();
+  statusEl.textContent += `\n[${t}] ${msg}`;
+  statusEl.scrollTop = statusEl.scrollHeight;
+  console.log(msg);
+}
+
+// --- Step 1: capability check ---------------------------------------------
+const capResultEl = document.getElementById('capResult');
+let chosenDevice = 'wasm';
+let chosenDtype = 'q8';
+
+async function checkCapabilities() {
+  let webgpuOk = false;
+  if ('gpu' in navigator) {
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      webgpuOk = !!adapter;
+    } catch (e) {
+      webgpuOk = false;
+    }
+  }
+  if (webgpuOk) {
+    chosenDevice = 'webgpu';
+    chosenDtype = 'fp32';
+  } else {
+    chosenDevice = 'wasm';
+    chosenDtype = 'q8';
+  }
+  capResultEl.innerHTML = `WebGPU: <b>${webgpuOk ? 'available' : 'NOT available'}</b><br>Will use: <b>${chosenDevice} / ${chosenDtype}</b>`;
+  log(`Capability check: WebGPU=${webgpuOk} -> using ${chosenDevice}/${chosenDtype}`);
+  document.getElementById('loadModelBtn').disabled = false;
+}
+checkCapabilities();
+
+// --- Step 2: load model -----------------------------------------------------
+let tts = null;
+let modelLoadMs = null;
+
+document.getElementById('loadModelBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('loadModelBtn');
+  btn.disabled = true;
+  log(`Loading Kokoro (${chosenDevice}/${chosenDtype})... this downloads the model on first run, can take a while.`);
+  const resultEl = document.getElementById('loadResult');
+  resultEl.textContent = 'Loading...';
+  try {
+    const { KokoroTTS } = await import('https://cdn.jsdelivr.net/npm/kokoro-js@1/+esm');
+    const start = performance.now();
+    tts = await KokoroTTS.from_pretrained('onnx-community/Kokoro-82M-v1.0-ONNX', {
+      dtype: chosenDtype,
+      device: chosenDevice,
+      progress_callback: (p) => {
+        if (p && p.status === 'progress' && p.file) {
+          const pct = p.total ? Math.round((p.loaded / p.total) * 100) : '?';
+          resultEl.textContent = `Downloading ${p.file}: ${pct}%`;
+        }
+      },
+    });
+    modelLoadMs = Math.round(performance.now() - start);
+    resultEl.innerHTML = `Model loaded in <b>${modelLoadMs}ms</b> (${chosenDevice}/${chosenDtype}).`;
+    log(`Model loaded in ${modelLoadMs}ms.`);
+    document.getElementById('speedTestBtn').disabled = false;
+  } catch (err) {
+    resultEl.innerHTML = `<span style="color:#ff6b6b">Failed to load: ${err.message}</span>`;
+    log(`Model load FAILED: ${err.message}. This itself is a useful result -- it means Kokoro isn't viable on this device/browser as-is.`);
+  }
+  btn.disabled = false;
+});
+
+// --- Step 3: synthesis speed test -------------------------------------------
+const TEST_SENTENCES = [
+  "The quick brown fox jumps over the lazy dog.",
+  "Reading quietly under the soft evening light, she slowly turned each page without a sound.",
+  "The old lighthouse keeper climbed the spiral stairs every evening, checking the great lamp before the fog rolled in from the cold, dark sea, just as he had for thirty years.",
+];
+let lastSampleBlob = null;
+let avgMsPerWord = null;
+
+document.getElementById('speedTestBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('speedTestBtn');
+  btn.disabled = true;
+  const resultEl = document.getElementById('speedResult');
+  resultEl.textContent = 'Running...';
+  log('Starting synthesis speed test (3 sentences, no concurrent load)...');
+
+  const rows = [];
+  for (const sentence of TEST_SENTENCES) {
+    const wordCount = sentence.split(/\s+/).length;
+    const start = performance.now();
+    const audio = await tts.generate(sentence, { voice: 'af_heart' });
+    const durationMs = Math.round(performance.now() - start);
+    const msPerWord = Math.round(durationMs / wordCount);
+    rows.push({ wordCount, durationMs, msPerWord });
+    lastSampleBlob = audio.toBlob();
+    log(`  "${sentence.slice(0, 30)}..." (${wordCount} words) -> ${durationMs}ms synth (${msPerWord}ms/word)`);
+  }
+
+  avgMsPerWord = Math.round(rows.reduce((s, r) => s + r.msPerWord, 0) / rows.length);
+  resultEl.innerHTML = `
+    <table>
+      <tr><th>Words</th><th>Synth time</th><th>ms/word</th></tr>
+      ${rows.map(r => `<tr><td>${r.wordCount}</td><td>${r.durationMs}ms</td><td>${r.msPerWord}ms</td></tr>`).join('')}
+    </table>
+    <div class="metric">Average: <b>${avgMsPerWord}ms/word</b> (alone, no concurrent load)</div>
+  `;
+  log(`Speed test done. Average ${avgMsPerWord}ms/word (no concurrent load).`);
+  document.getElementById('playSampleBtn').disabled = false;
+  document.getElementById('concurrentTestBtn').disabled = false;
+  document.getElementById('breakevenBtn').disabled = false;
+  btn.disabled = false;
+});
+
+document.getElementById('playSampleBtn').addEventListener('click', () => {
+  if (!lastSampleBlob) return;
+  const audio = new Audio(URL.createObjectURL(lastSampleBlob));
+  audio.play();
+});
+
+// --- Step 4: concurrent load test (webcam + MediaPipe) ----------------------
+document.getElementById('concurrentTestBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('concurrentTestBtn');
+  btn.disabled = true;
+  const resultEl = document.getElementById('concurrentResult');
+  resultEl.textContent = 'Starting webcam + face model...';
+  log('Starting concurrent load test -- this needs webcam permission.');
+
+  try {
+    const { FaceLandmarker, FilesetResolver } = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14');
+    const video = document.getElementById('camVideo');
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    video.srcObject = stream;
+    await new Promise(r => { video.onloadedmetadata = r; });
+    video.play();
+
+    const filesetResolver = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+    );
+    const faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+      baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+        delegate: "GPU"
+      },
+      runningMode: "VIDEO",
+      numFaces: 1,
+    });
+    log('Face model loaded, webcam running. Measuring baseline FPS for 3s...');
+    resultEl.textContent = 'Measuring baseline FPS (face tracking alone, 3s)...';
+
+    let running = true;
+    let frameCount = 0;
+    function predictLoop() {
+      if (!running) return;
+      faceLandmarker.detectForVideo(video, performance.now());
+      frameCount += 1;
+      requestAnimationFrame(predictLoop);
+    }
+    predictLoop();
+    await new Promise(r => setTimeout(r, 3000));
+    running = false;
+    const baselineFps = (frameCount / 3).toFixed(1);
+    log(`Baseline FPS (face tracking alone): ${baselineFps}`);
+
+    resultEl.textContent = 'Measuring FPS + synth time WITH concurrent load...';
+    running = true;
+    frameCount = 0;
+    predictLoop();
+
+    const synthStart = performance.now();
+    for (const sentence of TEST_SENTENCES) {
+      await tts.generate(sentence, { voice: 'af_heart' });
+    }
+    const synthDurationMs = Math.round(performance.now() - synthStart);
+    running = false;
+
+    const totalWords = TEST_SENTENCES.reduce((s, sent) => s + sent.split(/\s+/).length, 0);
+    const concurrentMsPerWord = Math.round(synthDurationMs / totalWords);
+    const elapsedSeconds = synthDurationMs / 1000;
+    const concurrentFps = (frameCount / elapsedSeconds).toFixed(1);
+
+    stream.getTracks().forEach(t => t.stop());
+
+    const fpsDegradation = Math.round((1 - concurrentFps / baselineFps) * 100);
+    const synthDegradation = avgMsPerWord ? Math.round((concurrentMsPerWord / avgMsPerWord - 1) * 100) : null;
+
+    resultEl.innerHTML = `
+      <div class="metric">Baseline FPS (tracking alone): <b>${baselineFps}</b></div>
+      <div class="metric">FPS during concurrent synth: <b>${concurrentFps}</b> (${fpsDegradation}% degradation)</div>
+      <div class="metric">Synth speed under concurrent load: <b>${concurrentMsPerWord}ms/word</b>${synthDegradation !== null ? ` (${synthDegradation}% slower than alone)` : ''}</div>
+    `;
+    log(`Concurrent test done. FPS: ${baselineFps} -> ${concurrentFps} (${fpsDegradation}% degradation). Synth: ${avgMsPerWord}ms/word -> ${concurrentMsPerWord}ms/word under load.`);
+    avgMsPerWord = concurrentMsPerWord;
+  } catch (err) {
+    resultEl.innerHTML = `<span style="color:#ff6b6b">Failed: ${err.message}</span>`;
+    log(`Concurrent test FAILED: ${err.message}`);
+  }
+  btn.disabled = false;
+});
+
+// --- Step 5: breakeven calculator -------------------------------------------
+document.getElementById('breakevenBtn').addEventListener('click', () => {
+  const calibratedMsPerWord = Number(document.getElementById('calibratedMsPerWord').value);
+  const resultEl = document.getElementById('breakevenResult');
+  if (!avgMsPerWord) {
+    resultEl.textContent = 'Run the speed test (Step 3) first.';
+    return;
+  }
+  const clears = calibratedMsPerWord >= avgMsPerWord;
+  resultEl.innerHTML = `
+    <div class="metric">Kokoro synth speed on this device: <b>${avgMsPerWord}ms/word</b></div>
+    <div class="metric">Your calibrated reading pace: <b>${calibratedMsPerWord}ms/word</b></div>
+    <div class="metric">Breakeven: <b class="${clears ? '' : 'bad'}">${clears ? 'CLEARS -- wait should converge to ~0ms' : `DOES NOT CLEAR -- you would be waiting roughly ${Math.round(avgMsPerWord - calibratedMsPerWord)}ms extra per word on average`}</b></div>
+  `;
+  log(`Breakeven check: device=${avgMsPerWord}ms/word vs calibrated=${calibratedMsPerWord}ms/word -> ${clears ? 'CLEARS' : 'DOES NOT CLEAR'}`);
+});
+</script>
+</body>
+</html>

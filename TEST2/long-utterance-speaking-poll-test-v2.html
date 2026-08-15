@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Long-utterance speaking-poll test</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 900px; margin: 30px auto; padding: 0 16px; background:#0b1418; color:#e6f0ee; }
+  h1 { font-size: 1.3rem; }
+  button { padding: 10px 16px; font-size: 1rem; margin-right: 8px; cursor: pointer; }
+  label { display:block; margin: 8px 0; }
+  #status { font-weight: bold; margin: 12px 0; }
+  #summary { white-space: pre-wrap; background:#111d22; padding:12px; border-radius:6px; font-family: monospace; font-size: 0.85rem; max-height: 320px; overflow:auto; }
+  #log { white-space: pre-wrap; background:#0e181c; padding:12px; border-radius:6px; font-family: monospace; font-size: 0.78rem; max-height: 280px; overflow:auto; margin-top: 12px; }
+  .blip { color: #ff8080; font-weight: bold; }
+  .ok { color: #7fd88f; }
+</style>
+</head>
+<body>
+<h1>Long-utterance speaking-poll test</h1>
+<p>Checks whether <code>speechSynthesis.speaking</code> can flip <code>false</code> for a moment
+mid-speech during a long, never-cancelled utterance — the theory for the mid-paragraph
+"stuck waiting for mouth to open" bug from Entry 40. Run the sanity check first.</p>
+
+<button id="sanityBtn">1. Sanity check (speak one short sentence)</button>
+<br><br>
+<label>Trials to run: <input type="number" id="trialCount" value="3" min="1" max="20" style="width:60px"></label>
+<button id="startBtn">2. Run long-utterance trials</button>
+<button id="stopBtn" disabled>Stop</button>
+
+<div id="status">Idle.</div>
+<div id="summary"></div>
+<div id="log"></div>
+
+<script>
+const synth = window.speechSynthesis;
+
+const LONG_TEXT = (
+  "The old lighthouse stood at the edge of the cliff, its paint peeling under " +
+  "decades of salt wind. Every evening the keeper climbed the spiral stairs to " +
+  "light the lamp before the fog rolled in from the west. Ships passing in the " +
+  "darkness relied on that small point of light more than they ever admitted. " +
+  "On quiet nights the keeper would sit by the window and watch the waves fold " +
+  "over themselves again and again, endlessly patient. Sometimes a storm would " +
+  "arrive without warning, rattling the shutters and testing the old stone " +
+  "walls. The keeper always said the lighthouse had outlasted three centuries " +
+  "of weather and would outlast a few more. Visitors rarely came this far " +
+  "along the coast, but those who did often stayed longer than they planned. " +
+  "There was something about the rhythm of the light sweeping across the water " +
+  "that made people forget the time. Local fishermen trusted the beam more " +
+  "than any chart or compass, especially when the mist thickened without " +
+  "notice. Over the years the keeper had learned every creak in the floor and " +
+  "every gust that meant trouble was coming."
+);
+const totalWordsApprox = LONG_TEXT.split(' ').length;
+
+const statusEl = document.getElementById('status');
+const summaryEl = document.getElementById('summary');
+const logEl = document.getElementById('log');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const sanityBtn = document.getElementById('sanityBtn');
+
+let stopRequested = false;
+
+function log(msg, cls) {
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.textContent = msg;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function dumpState(label) {
+  const voices = synth.getVoices();
+  log(`  [state] ${label}: paused=${synth.paused} pending=${synth.pending} speaking=${synth.speaking} voices=${voices.length}`);
+}
+
+// --- 1. Sanity check --------------------------------------------------
+sanityBtn.addEventListener('click', () => {
+  logEl.innerHTML = '';
+  summaryEl.textContent = '';
+  dumpState('before speak()');
+
+  const u = new SpeechSynthesisUtterance('Testing one two three, this is a short sanity check sentence.');
+  const t0 = performance.now();
+  let started = false;
+
+  u.onstart = () => { started = true; log(`  [onstart fired] t=${Math.round(performance.now() - t0)}ms`, 'ok'); };
+  u.onend = () => { log(`  [onend fired] t=${Math.round(performance.now() - t0)}ms`, 'ok'); };
+  u.onerror = (e) => { log(`  [onerror fired] t=${Math.round(performance.now() - t0)}ms, error=${e.error}`, 'blip'); };
+
+  log('Speaking short sanity sentence — you should hear it out loud...');
+  synth.speak(u);
+  dumpState('right after speak()');
+
+  let ticks = 0;
+  const pid = setInterval(() => {
+    ticks++;
+    const t = Math.round(performance.now() - t0);
+    log(`  [poll] t=${t}ms speaking=${synth.speaking} pending=${synth.pending}`);
+    if (t > 6000) {
+      clearInterval(pid);
+      summaryEl.textContent = started
+        ? 'Sanity check passed: onstart fired, basic speech works on this page.'
+        : 'SANITY CHECK FAILED: onstart never fired and speaking never went true for even a short sentence. This points to a synth-level problem (voices not loaded, paused state, or a permissions/autoplay restriction), separate from anything about long utterances.';
+    }
+  }, 250);
+});
+
+// --- 2. Long-utterance trials ------------------------------------------
+function runTrial(trialNum) {
+  return new Promise((resolve) => {
+    const utter = new SpeechSynthesisUtterance(LONG_TEXT);
+    let boundaryCount = 0;
+    let hasSpokenAtLeastOnce = false;
+    let firstSpeakingTrueAt = null;
+    let consecutiveFalse = 0;
+    let naiveStopTime = null;
+    let blips = [];
+    let onendFired = false;
+    const trialStart = performance.now();
+
+    utter.onboundary = (e) => { if (e.name === 'word') boundaryCount++; };
+    utter.onstart = () => log(`  [onstart] t=${Math.round(performance.now() - trialStart)}ms`, 'ok');
+    utter.onerror = (e) => log(`  [onerror] t=${Math.round(performance.now() - trialStart)}ms, error=${e.error}`, 'blip');
+    utter.onend = () => { onendFired = true; };
+
+    log(`--- Trial ${trialNum} start (~${totalWordsApprox} words) ---`);
+    dumpState(`trial ${trialNum} before speak()`);
+    synth.speak(utter);
+
+    const pollId = setInterval(() => {
+      const t = Math.round(performance.now() - trialStart);
+      const speaking = synth.speaking;
+
+      if (speaking) {
+        if (!hasSpokenAtLeastOnce) {
+          hasSpokenAtLeastOnce = true;
+          firstSpeakingTrueAt = t;
+          log(`  [STARTED] t=${t}ms`, 'ok');
+        }
+        consecutiveFalse = 0;
+      } else {
+        consecutiveFalse++;
+        if (hasSpokenAtLeastOnce && naiveStopTime === null) {
+          naiveStopTime = t;
+          const wordsRemaining = Math.max(0, totalWordsApprox - boundaryCount);
+          if (wordsRemaining > 3) {
+            blips.push({ t, boundaryCount, wordsRemaining });
+            log(`  [BLIP] t=${t}ms speaking=false, only ${boundaryCount}/${totalWordsApprox} words boundaried`, 'blip');
+          }
+        }
+      }
+
+      if (speaking && naiveStopTime !== null) {
+        log(`  [RECOVER] t=${t}ms speaking=true again after provisional stop at ${naiveStopTime}ms`, 'blip');
+        naiveStopTime = null;
+        consecutiveFalse = 0;
+      }
+
+      const done = !speaking && consecutiveFalse >= 10 && boundaryCount >= totalWordsApprox - 2;
+      const neverStarted = t > 5000 && !hasSpokenAtLeastOnce;
+      const stuckMidway = hasSpokenAtLeastOnce && t > 90000; // generous — natural TTS pace for 186 words is roughly 45-65s
+
+      if (t % 5000 < 20 && hasSpokenAtLeastOnce && !done) {
+        log(`  [progress] t=${t}ms, ${boundaryCount}/${totalWordsApprox} words so far, speaking=${speaking}`);
+      }
+
+      if (done || neverStarted || stuckMidway) {
+        clearInterval(pollId);
+        if (!done) synth.cancel();
+        const outcome = done ? 'completed' : neverStarted ? 'never-started' : 'stuck-midway';
+        log(`--- Trial ${trialNum} [${outcome}]: ${boundaryCount}/${totalWordsApprox} words, ${t}ms, onend=${onendFired}, blips=${blips.length} ---`,
+            (blips.length > 0 || outcome !== 'completed') ? 'blip' : 'ok');
+        resolve({ trialNum, outcome, boundaryCount, durationMs: t, onendFired, hasSpokenAtLeastOnce, firstSpeakingTrueAt, blips });
+      }
+    }, 20);
+  });
+}
+
+async function runAll() {
+  const n = Math.max(1, Math.min(20, parseInt(document.getElementById('trialCount').value, 10) || 1));
+  stopRequested = false;
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  logEl.innerHTML = '';
+  summaryEl.textContent = '';
+
+  const results = [];
+  for (let i = 1; i <= n; i++) {
+    if (stopRequested) break;
+    statusEl.textContent = `Running trial ${i}/${n}...`;
+    const r = await runTrial(i);
+    results.push(r);
+    await new Promise((res) => setTimeout(res, 1000));
+  }
+
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  statusEl.textContent = stopRequested ? 'Stopped.' : 'Done.';
+
+  const neverStarted = results.filter((r) => r.outcome === 'never-started').length;
+  const stuckMidway = results.filter((r) => r.outcome === 'stuck-midway').length;
+  const totalBlips = results.reduce((s, r) => s + r.blips.length, 0);
+  const trialsWithBlips = results.filter((r) => r.blips.length > 0).length;
+
+  let out = `Trials run: ${results.length}\n`;
+  out += `Never started at all: ${neverStarted}\n`;
+  out += `Started but stuck midway (25s timeout): ${stuckMidway}\n`;
+  out += `Trials with a genuine mid-stream blip: ${trialsWithBlips}\n`;
+  out += `Total blips: ${totalBlips}\n\n`;
+  results.forEach((r) => {
+    out += `Trial ${r.trialNum} [${r.outcome}]: started=${r.hasSpokenAtLeastOnce}, ${r.boundaryCount} words, ${r.durationMs}ms, blips=${r.blips.length}\n`;
+  });
+  summaryEl.textContent = out;
+}
+
+startBtn.addEventListener('click', runAll);
+stopBtn.addEventListener('click', () => {
+  stopRequested = true;
+  synth.cancel();
+});
+</script>
+</body>
+</html>

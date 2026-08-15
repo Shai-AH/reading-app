@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Mumblew — mobile onboundary diagnostic</title>
+<style>
+  :root {
+    --bg: #0D1417; --surface: #16221F; --border: #26363A;
+    --text: #EDEDE8; --muted: #9AA6A3; --teal: #2FBF9A;
+    --amber: #F0AC2E; --danger: #FF6B6B;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    margin: 0; padding: 20px 16px 60px; max-width: 640px; margin: 0 auto;
+    line-height: 1.5;
+  }
+  h1 { font-size: 18px; margin-bottom: 4px; }
+  p.sub { color: var(--muted); font-size: 13px; margin-top: 0; }
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px; margin-top: 14px;
+  }
+  .panel h2 { font-size: 15px; margin: 0 0 6px; }
+  .panel p { font-size: 13px; color: var(--muted); margin: 4px 0 10px; }
+  button {
+    background: #1C2A27; color: var(--text); border: 1px solid #35494E;
+    border-radius: 8px; padding: 10px 14px; font-size: 14px;
+    width: 100%; margin-top: 6px; cursor: pointer;
+  }
+  button:disabled { opacity: 0.4; }
+  select { width: 100%; padding: 8px; margin-top: 4px; background: #1C2A27; color: var(--text); border: 1px solid #35494E; border-radius: 8px; }
+  .stat-row { display: flex; justify-content: space-between; font-family: monospace; font-size: 13px; padding: 3px 0; border-bottom: 1px solid #1f2b28; }
+  .stat-row span:last-child { color: var(--teal); font-weight: 600; }
+  .stat-row.bad span:last-child { color: var(--danger); }
+  #log {
+    font-family: monospace; font-size: 11px; background: #0A1012;
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px;
+    height: 160px; overflow-y: auto; white-space: pre-wrap; margin-top: 8px;
+  }
+  #verdict { font-size: 14px; font-weight: 600; margin-top: 10px; padding: 10px; border-radius: 8px; display: none; }
+  #verdict.ok { background: #12271f; color: var(--teal); display: block; }
+  #verdict.bad { background: #331a1c; color: var(--danger); display: block; }
+  #verdict.warn { background: #332617; color: var(--amber); display: block; }
+</style>
+</head>
+<body>
+
+<h1>Mumblew — onboundary reliability diagnostic</h1>
+<p class="sub">Standalone test page. No camera, no MediaPipe — this only tests whether the browser's speech engine reports word-boundary events reliably. Open this on the mobile device/browser where the highlighter freezes.</p>
+
+<div class="panel">
+  <h2>Setup</h2>
+  <p>Pick a LOCAL voice (same restriction the real app uses) and tap the button once first — mobile browsers require a real tap before speech is allowed to start.</p>
+  <select id="voiceSelect"><option value="">Browser default</option></select>
+</div>
+
+<div class="panel" id="testA">
+  <h2>Test A — main window, single utterance</h2>
+  <p>Speaks a 14-word sentence directly through the page's own speechSynthesis. This is the simplest possible case.</p>
+  <button id="btnA">▶ Run Test A</button>
+</div>
+
+<div class="panel" id="testB">
+  <h2>Test B — fresh iframe, single utterance</h2>
+  <p>Same sentence, but spoken through a freshly-created hidden iframe's speechSynthesis — this mimics exactly what the real app does on every TTS-engine recycle (Phase 9a).</p>
+  <button id="btnB">▶ Run Test B</button>
+</div>
+
+<div class="panel" id="testC">
+  <h2>Test C — 8 calls in a row, iframe recycled every 6</h2>
+  <p>Simulates a real reading session: 8 short utterances spoken back-to-back, with a brand-new iframe swapped in before call 1 and again before call 7 — identical timing to the app's <code>IFRAME_RECYCLE_EVERY_N_CALLS=6</code>. Watches whether boundary events specifically degrade right after a recycle.</p>
+  <button id="btnC">▶ Run Test C</button>
+</div>
+
+<div class="panel">
+  <h2>Live stats</h2>
+  <div class="stat-row"><span>State</span><span id="stState">idle</span></div>
+  <div class="stat-row"><span>Expected words this utterance</span><span id="stExpected">-</span></div>
+  <div class="stat-row"><span>Boundary events fired</span><span id="stFired">-</span></div>
+  <div class="stat-row"><span>Last boundary — ms ago</span><span id="stAgo">-</span></div>
+  <div id="log"></div>
+</div>
+
+<div id="verdict"></div>
+
+<script>
+const SENTENCE = "The cat slowly wandered through an unexpectedly enormous garden while butterflies fluttered quietly overhead.";
+const EXPECTED_WORDS = SENTENCE.trim().split(/\s+/).length; // 14
+
+const voiceSelect = document.getElementById('voiceSelect');
+const stState = document.getElementById('stState');
+const stExpected = document.getElementById('stExpected');
+const stFired = document.getElementById('stFired');
+const stAgo = document.getElementById('stAgo');
+const logEl = document.getElementById('log');
+const verdictEl = document.getElementById('verdict');
+
+function log(msg) {
+  const t = new Date().toISOString().substr(11, 12);
+  logEl.textContent += `[${t}] ${msg}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function isVoiceAllowed(v) { return v.localService === true; }
+
+function populateVoices() {
+  const all = window.speechSynthesis.getVoices().filter(isVoiceAllowed);
+  voiceSelect.innerHTML = '<option value="">Browser default</option>';
+  for (const v of all) {
+    const opt = document.createElement('option');
+    opt.value = v.voiceURI;
+    opt.textContent = `${v.name} (${v.lang})`;
+    voiceSelect.appendChild(opt);
+  }
+}
+populateVoices();
+window.speechSynthesis.addEventListener('voiceschanged', populateVoices);
+
+function resolveVoice() {
+  const uri = voiceSelect.value;
+  if (!uri) return null;
+  return window.speechSynthesis.getVoices().find(v => v.voiceURI === uri) || null;
+}
+
+// live "last boundary ago" ticker, same purpose as the app's debug panel
+let lastBoundaryTime = 0;
+setInterval(() => {
+  if (lastBoundaryTime > 0) {
+    stAgo.textContent = Math.round(performance.now() - lastBoundaryTime);
+  }
+}, 200);
+
+function speakOnce(synth, UtteranceCtor, label, onDone) {
+  const utter = new UtteranceCtor(SENTENCE);
+  const voice = resolveVoice();
+  if (voice) utter.voice = voice;
+  utter.rate = 1.0;
+
+  let fired = 0;
+  stExpected.textContent = String(EXPECTED_WORDS);
+  stFired.textContent = '0';
+  stState.textContent = `speaking (${label})`;
+  log(`--- ${label}: speak() called, expecting ${EXPECTED_WORDS} word-boundary events ---`);
+
+  utter.onboundary = (e) => {
+    if (e.name !== 'word') return;
+    fired += 1;
+    lastBoundaryTime = performance.now();
+    stFired.textContent = String(fired);
+    log(`  boundary #${fired} charIndex=${e.charIndex}`);
+  };
+
+  let doneHandled = false;
+  function finish(reason) {
+    if (doneHandled) return;
+    doneHandled = true;
+    stState.textContent = 'idle';
+    log(`--- ${label} finished (${reason}) — ${fired}/${EXPECTED_WORDS} boundary events fired ---`);
+    onDone(fired);
+  }
+  utter.onend = () => finish('onend');
+
+  // Defensive poll, same convention as the real app: onend is known to be
+  // unreliable in some browsers, so don't only rely on it.
+  const pollId = setInterval(() => {
+    if (!synth.speaking) {
+      clearInterval(pollId);
+      finish('speaking-poll');
+    }
+  }, 100);
+  // Absolute timeout so a fully-wedged engine doesn't hang the test forever
+  setTimeout(() => { clearInterval(pollId); finish('timeout-safety'); }, 8000);
+
+  synth.speak(utter);
+}
+
+function spawnIframeSynth() {
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  iframe.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(iframe);
+  return {
+    synth: iframe.contentWindow.speechSynthesis,
+    UtteranceCtor: iframe.contentWindow.SpeechSynthesisUtterance,
+    iframe
+  };
+}
+
+function showVerdict(cls, text) {
+  verdictEl.className = cls;
+  verdictEl.textContent = text;
+}
+
+document.getElementById('btnA').addEventListener('click', () => {
+  verdictEl.className = ''; logEl.textContent = '';
+  speakOnce(window.speechSynthesis, window.SpeechSynthesisUtterance, 'Test A (main window)', (fired) => {
+    if (fired === EXPECTED_WORDS) showVerdict('ok', `Test A: all ${fired}/${EXPECTED_WORDS} boundaries fired. Main-window speech is reliable here.`);
+    else if (fired === 0) showVerdict('bad', `Test A: 0 boundary events fired at all. onboundary is broken on this browser even without any iframe involved.`);
+    else showVerdict('warn', `Test A: only ${fired}/${EXPECTED_WORDS} boundaries fired. Partial/unreliable even in the simplest case.`);
+  });
+});
+
+document.getElementById('btnB').addEventListener('click', () => {
+  verdictEl.className = ''; logEl.textContent = '';
+  const { synth, UtteranceCtor } = spawnIframeSynth();
+  speakOnce(synth, UtteranceCtor, 'Test B (fresh iframe)', (fired) => {
+    if (fired === EXPECTED_WORDS) showVerdict('ok', `Test B: all ${fired}/${EXPECTED_WORDS} boundaries fired through the iframe too. Iframe use alone isn't the problem.`);
+    else if (fired === 0) showVerdict('bad', `Test B: 0 boundary events fired through the iframe. This strongly points at iframe-based speechSynthesis as the cause — compare against Test A's result.`);
+    else showVerdict('warn', `Test B: only ${fired}/${EXPECTED_WORDS} boundaries fired through the iframe. Compare against Test A to see if the iframe made it worse.`);
+  });
+});
+
+document.getElementById('btnC').addEventListener('click', () => {
+  verdictEl.className = ''; logEl.textContent = '';
+  const RECYCLE_EVERY = 6;
+  const TOTAL_CALLS = 8;
+  let engine = { synth: window.speechSynthesis, UtteranceCtor: window.SpeechSynthesisUtterance };
+  const results = [];
+
+  function runCall(n) {
+    if (n > TOTAL_CALLS) {
+      const summary = results.map((f, i) => `call ${i + 1}: ${f}/${EXPECTED_WORDS}${(i + 1) === 1 || (i + 1) === 7 ? ' (fresh iframe)' : ''}`).join('\n');
+      log(`=== Test C complete ===\n${summary}`);
+      const brokenAfterRecycle = results[6] !== undefined && results[6] < EXPECTED_WORDS && results[5] === EXPECTED_WORDS;
+      const anyZero = results.some(f => f === 0);
+      if (anyZero) {
+        showVerdict('bad', `Test C: at least one call fired ZERO boundary events. See log for which call — if it's call 1 or 7 (right after a fresh iframe), that confirms the recycle is the trigger.`);
+      } else if (brokenAfterRecycle) {
+        showVerdict('warn', `Test C: boundaries degraded specifically after the call-7 recycle. This points at iframe recycling as the cause.`);
+      } else if (results.every(f => f === EXPECTED_WORDS)) {
+        showVerdict('ok', `Test C: all 8 calls fired all ${EXPECTED_WORDS} boundaries, including right after both recycles. Recycling isn't the cause on this device/browser.`);
+      } else {
+        showVerdict('warn', `Test C: some calls under-fired but not obviously tied to the recycle points. See log for the per-call pattern.`);
+      }
+      return;
+    }
+    if (n === 1 || n === 7) {
+      engine = spawnIframeSynth();
+      log(`(fresh iframe spawned before call ${n})`);
+    }
+    speakOnce(engine.synth, engine.UtteranceCtor, `Test C call ${n}/${TOTAL_CALLS}`, (fired) => {
+      results.push(fired);
+      setTimeout(() => runCall(n + 1), 300);
+    });
+  }
+  runCall(1);
+});
+</script>
+</body>
+</html>

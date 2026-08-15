@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mumblew — TTS Stop-Reliability Test Harness</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 16px; background:#12181c; color:#e8eef0; }
+  h1 { font-size: 1.3rem; }
+  h3 { margin-bottom: 4px; }
+  p, li { line-height: 1.5; }
+  .controls { background:#1c262b; border:1px solid #2a373d; border-radius:8px; padding:14px 18px; margin-bottom:16px; }
+  .controls label { display:inline-block; margin: 6px 14px 6px 0; }
+  input[type=number] { width: 70px; }
+  button { background:#2a9d8f; color:#04211d; border:none; border-radius:6px; padding:8px 16px; font-weight:600; cursor:pointer; margin-right:8px; }
+  button:disabled { opacity:0.5; cursor:not-allowed; }
+  #summary { background:#1c262b; border:1px solid #2a373d; border-radius:8px; padding:10px 18px; margin-bottom:16px; min-height: 20px; }
+  #summary b { color:#f4a261; }
+  #log { background:#0a0e10; border:1px solid #2a373d; border-radius:8px; padding:12px; height: 340px; overflow-y:auto; white-space:pre-wrap; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; }
+  .note { font-size: 0.9rem; color:#9db3ba; }
+</style>
+</head>
+<body>
+
+<h1>TTS Stop-Reliability Test Harness</h1>
+<p class="note">
+  Isolated test page — no MediaPipe, no webcam, no dependency on the real app.
+  Tests three things against real <code>speechSynthesis</code> in this browser:
+  <br>1) whether polling the <code>speaking</code> property catches a stop faster/more reliably than waiting on <code>onend</code>,
+  <br>2) whether short (single-sentence) chunking + iframe recycling reduces overrun compared to a plain long utterance,
+  <br>3) whether a busy-loop standing in for MediaPipe's per-frame CPU cost changes either result.
+</p>
+
+<div class="controls">
+  <label>Cycles: <input id="cycles" type="number" value="20" min="1"></label>
+  <label>Min hold (ms): <input id="minHold" type="number" value="250"></label>
+  <label>Max hold (ms): <input id="maxHold" type="number" value="900"></label>
+  <br>
+  <label><input type="checkbox" id="useChunking"> Use short (per-sentence) chunking</label>
+  <label><input type="checkbox" id="useRecycle"> Use iframe recycle (every 6 calls)</label>
+  <label><input type="checkbox" id="useLoad"> Simulate CPU load (MediaPipe-like)</label>
+  <br>
+  <label>Load budget (ms busy per ~13ms tick): <input id="loadBudget" type="number" value="8" min="0" max="30"></label>
+  <br>
+  <button id="runBtn">Run Test</button>
+  <button id="clearBtn">Clear Log</button>
+</div>
+
+<div id="summary"></div>
+<pre id="log"></pre>
+
+<script>
+const SAMPLE_TEXT = `The quiet library had rows of tall wooden shelves that seemed to lean in
+toward each reader. Outside, the rain had just begun to tap against the windows in an
+uneven rhythm. She turned the page slowly, letting each sentence settle before moving
+to the next one. Somewhere down the hall a door creaked open and then closed again.
+It was the kind of afternoon that made time feel a little slower than usual. A cup of
+tea sat cooling on the table beside her, mostly forgotten. Every so often she paused,
+just to listen to the rain, before returning to the story in front of her.`;
+
+let ttsEngine = { synth: window.speechSynthesis, UtteranceCtor: window.SpeechSynthesisUtterance };
+let recycleCount = 0;
+let callCountSinceRecycle = 0;
+let currentIframe = null;
+
+function log(msg) {
+  const el = document.getElementById('log');
+  const t = performance.now().toFixed(0);
+  el.textContent += `[${t}ms] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function setupIframeEngine() {
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  document.body.appendChild(iframe);
+  ttsEngine.synth = iframe.contentWindow.speechSynthesis;
+  ttsEngine.UtteranceCtor = iframe.contentWindow.SpeechSynthesisUtterance;
+  return iframe;
+}
+
+function maybeRecycle(useRecycle) {
+  if (!useRecycle) return;
+  callCountSinceRecycle++;
+  if (callCountSinceRecycle >= 6) {
+    if (currentIframe) currentIframe.remove();
+    currentIframe = setupIframeEngine();
+    recycleCount++;
+    callCountSinceRecycle = 0;
+    log(`[recycle] iframe recycled (#${recycleCount})`);
+  }
+}
+
+function splitIntoSentences(text) {
+  return text.match(/[^.!?]+[.!?]+/g) || [text];
+}
+
+// Simulated CPU load: a busy-loop that eats a chunk of main-thread time on a
+// recurring tick, standing in for MediaPipe's per-frame inference cost. This
+// does NOT touch speechSynthesis at all — it only competes for the main
+// thread, which is the thing the real app's predictLoop() also does.
+let loadActive = false;
+let loadTickCount = 0;
+function loadTick(budgetMs) {
+  if (!loadActive) return;
+  const start = performance.now();
+  let x = 0;
+  while (performance.now() - start < budgetMs) {
+    x += Math.sqrt(Math.random() * 999999); // meaningless work, just burns CPU
+  }
+  loadTickCount++;
+  setTimeout(() => loadTick(budgetMs), 13); // ~30 ticks/sec, similar cadence to a frame loop
+}
+function startLoad(budgetMs) {
+  if (loadActive) return;
+  loadActive = true;
+  loadTickCount = 0;
+  loadTick(budgetMs);
+}
+function stopLoad() {
+  loadActive = false;
+}
+
+function pollSpeakingUntilFalse(cancelRequestedAt, onDone, maxWaitMs = 4000) {
+  const pollStart = performance.now();
+  const interval = setInterval(() => {
+    if (!ttsEngine.synth.speaking) {
+      clearInterval(interval);
+      onDone(performance.now() - cancelRequestedAt);
+    } else if (performance.now() - pollStart > maxWaitMs) {
+      clearInterval(interval);
+      onDone(null); // never went false within the wait window
+    }
+  }, 10);
+}
+
+function runOneCycle(cycleNum, opts, stats) {
+  return new Promise((resolve) => {
+    const sentences = opts.useChunking ? splitIntoSentences(SAMPLE_TEXT) : [SAMPLE_TEXT];
+    const text = sentences[cycleNum % sentences.length];
+    maybeRecycle(opts.useRecycle);
+
+    const utter = new ttsEngine.UtteranceCtor(text);
+    let boundaryAfterCancel = 0;
+    let cancelRequestedAt = null;
+    let endFired = false;
+    let endFiredAt = null;
+
+    utter.onboundary = () => {
+      if (cancelRequestedAt !== null) boundaryAfterCancel++;
+    };
+    utter.onend = () => {
+      endFired = true;
+      endFiredAt = performance.now();
+    };
+    utter.onerror = (e) => log(`cycle ${cycleNum}: onerror ${e.error}`);
+
+    ttsEngine.synth.speak(utter);
+    stats.speakCalls++;
+
+    const holdMs = opts.minHold + Math.random() * (opts.maxHold - opts.minHold);
+    setTimeout(() => {
+      cancelRequestedAt = performance.now();
+      ttsEngine.synth.cancel();
+
+      pollSpeakingUntilFalse(cancelRequestedAt, (speakingFalseGap) => {
+        const result = {
+          cycle: cycleNum,
+          holdMs: Math.round(holdMs),
+          speakingFalseGapMs: speakingFalseGap === null ? 'NEVER' : Math.round(speakingFalseGap),
+          onendFired: endFired,
+          onendGapMs: endFired ? Math.round(endFiredAt - cancelRequestedAt) : 'N/A',
+          boundaryEventsAfterCancel: boundaryAfterCancel,
+          recycleCountAtThisPoint: recycleCount
+        };
+        stats.results.push(result);
+        log(`cycle ${cycleNum}: hold=${result.holdMs}ms | speaking->false gap=${result.speakingFalseGapMs}${typeof result.speakingFalseGapMs === 'number' ? 'ms' : ''} | onend fired=${result.onendFired} (gap=${result.onendGapMs}) | boundary-events-after-cancel=${result.boundaryEventsAfterCancel} | recycles-so-far=${result.recycleCountAtThisPoint}`);
+        resolve();
+      });
+    }, holdMs);
+  });
+}
+
+async function runTest() {
+  const cycles = parseInt(document.getElementById('cycles').value, 10);
+  const minHold = parseInt(document.getElementById('minHold').value, 10);
+  const maxHold = parseInt(document.getElementById('maxHold').value, 10);
+  const useRecycle = document.getElementById('useRecycle').checked;
+  const useChunking = document.getElementById('useChunking').checked;
+  const useLoad = document.getElementById('useLoad').checked;
+  const loadBudget = parseInt(document.getElementById('loadBudget').value, 10);
+
+  recycleCount = 0;
+  callCountSinceRecycle = 0;
+  if (currentIframe) { currentIframe.remove(); currentIframe = null; }
+  ttsEngine.synth = window.speechSynthesis;
+  ttsEngine.UtteranceCtor = window.SpeechSynthesisUtterance;
+  if (useRecycle) currentIframe = setupIframeEngine();
+  if (useLoad) startLoad(loadBudget);
+
+  const stats = { speakCalls: 0, results: [] };
+  log(`=== Starting: ${cycles} cycles, hold ${minHold}-${maxHold}ms, chunking=${useChunking}, recycle=${useRecycle}, simulatedLoad=${useLoad}(${loadBudget}ms/tick) ===`);
+
+  for (let i = 0; i < cycles; i++) {
+    await runOneCycle(i, { minHold, maxHold, useRecycle, useChunking }, stats);
+    await new Promise(r => setTimeout(r, 150 + Math.random() * 250));
+  }
+
+  stopLoad();
+  summarize(stats, { useChunking, useRecycle, useLoad, loadBudget, loadTicks: loadTickCount });
+}
+
+function summarize(stats, opts) {
+  const n = stats.results.length;
+  const neverWentFalse = stats.results.filter(r => r.speakingFalseGapMs === 'NEVER').length;
+  const onendNeverFired = stats.results.filter(r => !r.onendFired).length;
+  const withOverrunBoundary = stats.results.filter(r => r.boundaryEventsAfterCancel > 0).length;
+  const validGaps = stats.results.filter(r => r.speakingFalseGapMs !== 'NEVER').map(r => r.speakingFalseGapMs);
+  const avgGap = validGaps.length ? (validGaps.reduce((a, b) => a + b, 0) / validGaps.length).toFixed(1) : 'N/A';
+
+  document.getElementById('summary').innerHTML = `
+    <h3>Summary — chunking=${opts.useChunking}, recycle=${opts.useRecycle}, simulatedLoad=${opts.useLoad}${opts.useLoad ? ` (${opts.loadBudget}ms/tick, ${opts.loadTicks} ticks ran)` : ''} (${n} cycles)</h3>
+    <ul>
+      <li>speak() calls made: ${stats.speakCalls}</li>
+      <li><b>speaking-property never went false:</b> ${neverWentFalse}/${n}</li>
+      <li><b>onend never fired:</b> ${onendNeverFired}/${n}</li>
+      <li><b>cycles with boundary events AFTER cancel (direct overrun proof):</b> ${withOverrunBoundary}/${n}</li>
+      <li>avg speaking-property false gap (when it did go false): ${avgGap}ms</li>
+    </ul>`;
+  log(`=== SUMMARY (chunking=${opts.useChunking}, recycle=${opts.useRecycle}, simulatedLoad=${opts.useLoad}/${opts.loadTicks} ticks): never-false=${neverWentFalse}/${n}, onend-never-fired=${onendNeverFired}/${n}, overrun-boundary-cycles=${withOverrunBoundary}/${n}, avg-speaking-gap=${avgGap}ms ===\n`);
+}
+
+document.getElementById('runBtn').addEventListener('click', () => {
+  document.getElementById('runBtn').disabled = true;
+  runTest().finally(() => { document.getElementById('runBtn').disabled = false; });
+});
+document.getElementById('clearBtn').addEventListener('click', () => {
+  document.getElementById('log').textContent = '';
+  document.getElementById('summary').innerHTML = '';
+});
+</script>
+</body>
+</html>

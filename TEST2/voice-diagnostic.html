@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mumblew — Voice Diagnostic Harness</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 1000px; margin: 24px auto; padding: 0 16px; background: #111; color: #eee; }
+  h1 { font-size: 20px; }
+  p { color: #aaa; line-height: 1.5; }
+  button { padding: 8px 14px; margin-right: 8px; margin-bottom: 12px; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 12px; }
+  th, td { border: 1px solid #444; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: #222; position: sticky; top: 0; }
+  tr.fail { background: #3a1414; }
+  tr.pass { background: #14311a; }
+  tr.running { background: #2a2410; }
+  .badge { font-weight: 600; }
+  .badge.ok { color: #6fce7c; }
+  .badge.bad { color: #ff6b6b; }
+  #status { font-family: monospace; white-space: pre-wrap; background: #1a1a1a; padding: 10px; border-radius: 4px; max-height: 200px; overflow-y: auto; margin-top: 10px; }
+  select { padding: 4px; }
+</style>
+</head>
+<body>
+<h1>Mumblew — Voice Diagnostic Harness</h1>
+<p>
+  Isolated test page, no camera/mouth-tracking involved. Tests every voice your
+  browser reports against the three behavioral contracts Mumblew's speech
+  architecture relies on:
+</p>
+<ul style="color:#aaa; line-height:1.6;">
+  <li><b>Cancel-reliability</b> — does <code>speechSynthesis.cancel()</code> actually
+      stop that voice mid-utterance within a bounded time? (If not: this is the
+      "keeps talking after mouth closes" bug.)</li>
+  <li><b>Boundary-accuracy</b> — does <code>onboundary</code> fire once per word,
+      with <code>charIndex</code> increasing correctly? (If not: this is the
+      "highlight snaps back to the same word" bug.)</li>
+  <li><b>Rate-honoring</b> — does doubling <code>utterance.rate</code> actually
+      roughly halve speaking duration for that voice? (If not: this is the
+      "speed doesn't match my calibration" bug.)</li>
+</ul>
+<p>
+  Uses the same iframe-recycle trick as the main app (every 6 <code>speak()</code>
+  calls) to avoid the already-confirmed Chromium call-count freeze
+  contaminating these results with an unrelated bug.
+</p>
+
+<div>
+  <button id="runAllBtn">Run All Tests (every voice)</button>
+  <button id="stopBtn" disabled>Stop</button>
+  <select id="singleVoiceSelect"></select>
+  <button id="runSingleBtn">Test This Voice Only</button>
+</div>
+
+<div id="status">Waiting for voice list to load...</div>
+
+<table id="resultsTable" style="display:none;">
+  <thead>
+    <tr>
+      <th>Voice</th>
+      <th>Lang</th>
+      <th>Local?</th>
+      <th>Cancel OK</th>
+      <th>Boundary events</th>
+      <th>Boundary monotonic?</th>
+      <th>Rate ratio (want ~2.0)</th>
+      <th>Rate honored?</th>
+      <th>Verdict</th>
+    </tr>
+  </thead>
+  <tbody id="resultsBody"></tbody>
+</table>
+
+<script>
+const statusEl = document.getElementById('status');
+const resultsTable = document.getElementById('resultsTable');
+const resultsBody = document.getElementById('resultsBody');
+const runAllBtn = document.getElementById('runAllBtn');
+const stopBtn = document.getElementById('stopBtn');
+const singleVoiceSelect = document.getElementById('singleVoiceSelect');
+const runSingleBtn = document.getElementById('runSingleBtn');
+
+function log(msg) {
+  const time = new Date().toLocaleTimeString();
+  statusEl.textContent += `\n[${time}] ${msg}`;
+  statusEl.scrollTop = statusEl.scrollHeight;
+  console.log(msg);
+}
+
+// --- Same iframe-recycle mechanism as main.js (Entry 39/40), so a long test
+// run across many voices doesn't itself trip the known call-count freeze and
+// get misread as a per-voice bug. ---
+const RECYCLE_EVERY_N_CALLS = 6;
+let ttsIframe = null;
+let callCount = 0;
+const ttsEngine = { synth: window.speechSynthesis, UtteranceCtor: window.SpeechSynthesisUtterance };
+
+function spawnFreshTtsIframe() {
+  if (ttsIframe) ttsIframe.remove();
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  document.body.appendChild(iframe);
+  ttsIframe = iframe;
+  ttsEngine.synth = iframe.contentWindow.speechSynthesis;
+  ttsEngine.UtteranceCtor = iframe.contentWindow.SpeechSynthesisUtterance;
+}
+spawnFreshTtsIframe();
+
+function maybeRecycle() {
+  callCount += 1;
+  if (callCount === 1 || (callCount - 1) % RECYCLE_EVERY_N_CALLS === 0) {
+    spawnFreshTtsIframe();
+  }
+}
+
+let stopRequested = false;
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// Resolves the live voice object for `uri` from the CURRENT synth instance —
+// mirrors main.js's resolveSelectedVoice(), same reasoning (iframe recycling
+// swaps the synth instance, cached voice objects aren't safe to reuse).
+function resolveVoice(uri) {
+  const voices = ttsEngine.synth.getVoices();
+  return voices.find(v => v.voiceURI === uri) || null;
+}
+
+// --- Test 1: cancel-reliability ------------------------------------------
+// Speaks a moderately long sentence, cancels partway through, and measures
+// whether `speaking` actually goes false within a bounded window. Two
+// trials per voice (different cancel timing) since a flaky voice may not
+// fail every single time.
+async function testCancelReliability(voiceURI) {
+  const sentence = "The quick brown fox jumps over the lazy dog while reading quietly under the soft evening light and slowly turning each page.";
+  const trials = [];
+  for (const cancelAfterMs of [700, 1400]) {
+    maybeRecycle();
+    const synth = ttsEngine.synth;
+    const utt = new ttsEngine.UtteranceCtor(sentence);
+    const voice = resolveVoice(voiceURI);
+    if (voice) utt.voice = voice;
+    synth.speak(utt);
+    await sleep(cancelAfterMs);
+    const cancelTime = performance.now();
+    synth.cancel();
+    // Poll for stop, 2000ms timeout
+    let stopped = false;
+    let waited = 0;
+    while (waited < 2000) {
+      if (!synth.speaking) { stopped = true; break; }
+      await sleep(20);
+      waited += 20;
+    }
+    const gapMs = Math.round(performance.now() - cancelTime);
+    trials.push({ stopped, gapMs });
+    if (!stopped) {
+      // Force-clear before moving on so it doesn't bleed into the next trial.
+      synth.cancel();
+      await sleep(300);
+    }
+    await sleep(200);
+  }
+  return trials;
+}
+
+// --- Test 2: boundary-accuracy --------------------------------------------
+async function testBoundaryAccuracy(voiceURI) {
+  const sentence = "The quick brown fox jumps over the lazy dog while reading quietly under the soft evening light";
+  const expectedWords = sentence.split(/\s+/).length;
+  maybeRecycle();
+  const synth = ttsEngine.synth;
+  const utt = new ttsEngine.UtteranceCtor(sentence);
+  const voice = resolveVoice(voiceURI);
+  if (voice) utt.voice = voice;
+
+  const events = [];
+  utt.onboundary = (e) => {
+    if (e.name !== 'word') return;
+    events.push(e.charIndex);
+  };
+
+  let done = false;
+  utt.onend = () => { done = true; };
+  synth.speak(utt);
+
+  let waited = 0;
+  while (!done && waited < 8000) {
+    await sleep(50);
+    waited += 50;
+    if (!synth.speaking && waited > 300) break; // finished or stalled
+  }
+  synth.cancel();
+  await sleep(200);
+
+  let monotonic = true;
+  for (let i = 1; i < events.length; i++) {
+    if (events[i] <= events[i - 1]) { monotonic = false; break; }
+  }
+  return { count: events.length, expected: expectedWords, monotonic, raw: events };
+}
+
+// --- Test 3: rate-honoring -------------------------------------------------
+async function testRateHonoring(voiceURI) {
+  const phrase = "Testing one two three four five six seven eight";
+  async function speakAndTime(rate) {
+    maybeRecycle();
+    const synth = ttsEngine.synth;
+    const utt = new ttsEngine.UtteranceCtor(phrase);
+    const voice = resolveVoice(voiceURI);
+    if (voice) utt.voice = voice;
+    utt.rate = rate;
+    const start = performance.now();
+    let done = false;
+    utt.onend = () => { done = true; };
+    synth.speak(utt);
+    let waited = 0;
+    while (!done && waited < 6000) {
+      await sleep(30);
+      waited += 30;
+      if (!synth.speaking && waited > 200) break;
+    }
+    const durationMs = performance.now() - start;
+    synth.cancel();
+    await sleep(200);
+    return durationMs;
+  }
+  const dur1x = await speakAndTime(1.0);
+  const dur2x = await speakAndTime(2.0);
+  const ratio = dur2x > 0 ? dur1x / dur2x : 0;
+  return { dur1x: Math.round(dur1x), dur2x: Math.round(dur2x), ratio };
+}
+
+function verdictRow(voice, cancelTrials, boundary, rate) {
+  const cancelOk = cancelTrials.every(t => t.stopped);
+  const boundaryOk = boundary.monotonic && boundary.count >= boundary.expected - 2; // small tolerance
+  const rateOk = rate.ratio >= 1.5; // want ~2.0, allow some slack before calling it "not honored"
+  const allOk = cancelOk && boundaryOk && rateOk;
+
+  const tr = document.createElement('tr');
+  tr.className = allOk ? 'pass' : 'fail';
+  tr.innerHTML = `
+    <td>${voice.name}</td>
+    <td>${voice.lang}</td>
+    <td>${voice.localService ? 'yes' : 'NETWORK'}</td>
+    <td>${cancelTrials.map(t => t.stopped ? `ok (${t.gapMs}ms)` : 'FAILED TO STOP').join(' / ')}</td>
+    <td>${boundary.count} / ${boundary.expected}</td>
+    <td class="badge ${boundary.monotonic ? 'ok' : 'bad'}">${boundary.monotonic ? 'yes' : 'NO'}</td>
+    <td>${rate.ratio.toFixed(2)}x (${rate.dur1x}ms → ${rate.dur2x}ms)</td>
+    <td class="badge ${rateOk ? 'ok' : 'bad'}">${rateOk ? 'yes' : 'NO'}</td>
+    <td class="badge ${allOk ? 'ok' : 'bad'}">${allOk ? 'PASS' : 'FAIL'}</td>
+  `;
+  resultsBody.appendChild(tr);
+}
+
+async function testOneVoice(voice) {
+  log(`Testing "${voice.name}" (${voice.lang}, ${voice.localService ? 'local' : 'NETWORK'})...`);
+  const cancelTrials = await testCancelReliability(voice.voiceURI);
+  if (stopRequested) return;
+  const boundary = await testBoundaryAccuracy(voice.voiceURI);
+  if (stopRequested) return;
+  const rate = await testRateHonoring(voice.voiceURI);
+  if (stopRequested) return;
+  verdictRow(voice, cancelTrials, boundary, rate);
+  log(`  → cancel: ${cancelTrials.map(t=>t.stopped).join(',')} | boundary: ${boundary.count}/${boundary.expected} monotonic=${boundary.monotonic} | rate ratio: ${rate.ratio.toFixed(2)}`);
+}
+
+async function runAll() {
+  const voices = window.speechSynthesis.getVoices();
+  if (voices.length === 0) {
+    log('No voices loaded yet — try again in a second.');
+    return;
+  }
+  stopRequested = false;
+  runAllBtn.disabled = true;
+  runSingleBtn.disabled = true;
+  stopBtn.disabled = false;
+  resultsBody.innerHTML = '';
+  resultsTable.style.display = 'table';
+  log(`Starting full test run — ${voices.length} voices. This will take a while (roughly 5-8s per voice).`);
+
+  for (const voice of voices) {
+    if (stopRequested) { log('Stopped by user.'); break; }
+    await testOneVoice(voice);
+  }
+
+  log(stopRequested ? 'Run stopped.' : 'All voices tested.');
+  runAllBtn.disabled = false;
+  runSingleBtn.disabled = false;
+  stopBtn.disabled = true;
+}
+
+runAllBtn.addEventListener('click', runAll);
+stopBtn.addEventListener('click', () => { stopRequested = true; });
+
+runSingleBtn.addEventListener('click', async () => {
+  const voices = window.speechSynthesis.getVoices();
+  const voice = voices.find(v => v.voiceURI === singleVoiceSelect.value);
+  if (!voice) return;
+  runAllBtn.disabled = true;
+  runSingleBtn.disabled = true;
+  resultsTable.style.display = 'table';
+  await testOneVoice(voice);
+  runAllBtn.disabled = false;
+  runSingleBtn.disabled = false;
+});
+
+function populateSingleVoiceSelect() {
+  const voices = window.speechSynthesis.getVoices();
+  if (voices.length === 0) return;
+  singleVoiceSelect.innerHTML = '';
+  for (const v of voices) {
+    const opt = document.createElement('option');
+    opt.value = v.voiceURI;
+    opt.textContent = `${v.name} (${v.lang})${v.localService ? '' : ' — NETWORK'}`;
+    singleVoiceSelect.appendChild(opt);
+  }
+  statusEl.textContent = `Loaded ${voices.length} voices. Ready to test.`;
+}
+
+populateSingleVoiceSelect();
+window.speechSynthesis.addEventListener('voiceschanged', populateSingleVoiceSelect);
+</script>
+</body>
+</html>
