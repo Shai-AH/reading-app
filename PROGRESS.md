@@ -1,5 +1,5 @@
 # PROGRESS LOG — "Mumblew" (reading app)
-Last updated: Aug 15, 2026 (Entry 56)
+Last updated: Aug 15, 2026 (Entry 57)
 
 > This file = Claude's memory. Read first every session. Trust this file over
 > assumptions. Update before ending a session. Section 3 = decisions +
@@ -50,6 +50,31 @@ oral-motor control. NOT late-stage bulbar — biological ceiling (Entry 17).
   check regressions on others.
 - Verify JS: `node --input-type=module --check < main.js` (stdin, not arg).
   `node --check file.js` misses errors in top-level-import files (E54).
+
+**Process rules adopted E57 (student directive, standing from here on):**
+- This file is Claude's memory, not a report — Claude owns its structure/
+  content, records own errors-not-to-repeat as needed, not just decisions.
+- Every session start: ask student specifically which module files are
+  needed for that session's task. Don't assume/request the whole codebase.
+- Enforce strict modularization on all new code going forward — no new
+  logic gets bolted into main.js or left interleaved without a deliberate
+  reason (same bar as the speech/mouth-tracking/calibration exception,
+  which required an explicit rationale, not a default).
+- End-of-session log update must show module connectivity (who imports/
+  reads/writes whom), not just a changelog of what got built.
+- If student's own testing setup/method is the actual problem, say so
+  directly and explain the correct test — don't silently adapt around a
+  false symptom or build a fix for a bug that isn't real.
+- All testing instructions: numbered, step-by-step, complete, no skipped
+  steps — student tests as often as needed, treat that as a cheap resource.
+- After every major change: remind student to small-ship (deploy that
+  increment) before stacking more unshipped changes.
+- Watch conversation length; proactively flag when it's dragged long enough
+  that token/context conservation calls for wrapping or logging soon.
+- Actively check for and flag dead code when relevant (leftover
+  functions/vars from refactors, orphaned declarations, etc.), not just
+  wait for student to notice (see E54 orphaned-function bug for the class
+  of thing to watch for).
 
 ## 3. Decisions (source of truth)
 
@@ -177,6 +202,60 @@ needs a live-tuning pass.**
 `updateRateSliderReadout()` (deleted decl, kept body+stray `}`). Also fixed
 the verification gap that missed it (see Section 2).
 
+**E57 bug fixes — 3 fixed, 2 parked.** Student-caught, laptop-only (not
+mobile-verified). All 3 fixed bugs confirmed pass by student, live-tested
+post-deploy.
+
+- **Fixed: `onWordClick` spoke without mouth-gating during calibration.**
+  Root cause: during calibration, `predictLoop()` routes MAR to
+  `updateCalibration()` instead of `updateMouthState()`, so `onMouthOpen`/
+  `onMouthClosed` never fire from the frame loop while calibrating — by
+  design, calibration owns the mouth signal exclusively then. But
+  `onWordClick()` (State-3 resync) never checked `getCalibrationActive()`,
+  so a click during calibration could read a stale pre-calibration
+  `getMouthState()==='open'` and call `speakFrom()` directly — then nothing
+  during calibration ever called `onMouthClosed()` to stop it. Same failure
+  shape as the old no-face bug, different trigger. Fix: `onWordClick` now
+  returns immediately if `getCalibrationActive()` is true — word-click
+  resync is a reading-only action, ignored entirely while calibration owns
+  the mouth signal. One-line guard, matches existing `isIdle()`/button-
+  disable pattern already used elsewhere for this same state.
+- **Fixed: Load Text button disappeared on long paste.** Two compounding
+  causes: `resizeTextareaToFit()` grew the textarea to `scrollHeight` with
+  no cap, and `.accordion-panel.expanded .panel-body` (index.html) was
+  `max-height: 480px; overflow: hidden` — so a tall textarea pushed the
+  button (and anything else below it in that panel) past the clip boundary
+  and it was silently cut off, not scrolled off as it looked like. Fix:
+  `resizeTextareaToFit()` now caps growth at 260px and switches the
+  textarea itself to `overflow-y: auto` past that point (scrolls
+  internally, button stays put); `.panel-body` (expanded) changed from
+  `overflow: hidden` to `overflow-y: auto` as a backstop so nothing in that
+  pattern can silently clip again for an unrelated reason later.
+- **Fixed: feedback cooldown bypassed by page reload.** `feedbackLastSubmitAt`
+  was a plain in-memory variable in `feedback.js`, reset to 0 every reload —
+  trivial one-click bypass of the 15s soft cooldown. Fix: persisted to
+  `localStorage` (`readingAppFeedbackLastSubmitAt`), read on module load,
+  written on successful submit, both wrapped in try/catch (falls back to 0/
+  no-op silently if storage is unavailable — not worth surfacing to the
+  tester over a soft anti-spam nicety). Still not a hard security boundary
+  (clearing storage or switching browsers resets it) — Formspree's own
+  filtering + the honeypot remain the real defenses, this just closes the
+  obvious one-click hole. **New cross-domain fact:** `feedback.js` now reads
+  `localStorage` directly for the first time (previously fully self-
+  contained except the `getContext()` callback injection) — doesn't change
+  its module boundary/ownership, just worth remembering next time
+  `feedback.js` is touched.
+- **Parked: calibration-guide box points at nothing** (highlights an area
+  during a step where the camera isn't shown yet). Deliberately not fixed —
+  lives inside the tour/guide system already slated for full rework at 3d
+  #4 (contextual hints + intro redesign) and/or the planned
+  accessibility-apps-inspiration session. Fixing box placement now risks
+  wasted effort if the whole guide changes shape. Revisit when that phase
+  starts, not before.
+- **Parked: ambient border + warning box both read as visual distraction**
+  (not a bug, a design call). Folded into the existing "UI cleanup being
+  extended" work (3d #4/#5) rather than treated standalone.
+
 **main.js modularization — partial, done to the point of diminishing
 returns (E56).** 10 of 14 planned pieces cleanly extracted to `js/`; the
 rest (speech/mouth-tracking/calibration) deliberately left in main.js —
@@ -203,7 +282,11 @@ see rationale below. main.js: 4272 → 2723 lines.
 - `tour.js` — tour engine, intro sequence, welcome gate. One coupling point
   (`wireCalibrateIntro`) takes main.js's `startCalibration` as a callback.
 - `feedback.js` — Formspree widget. Takes a `getContext()` callback from
-  main.js for calibration-status/speed-setting.
+  main.js for calibration-status/speed-setting. **Since E57:** also reads/
+  writes `localStorage` directly (`readingAppFeedbackLastSubmitAt`, cooldown
+  persistence) — its first direct browser-storage dependency, no longer
+  fully side-effect-free from just the callback. Doesn't change ownership,
+  main.js still doesn't need to know about it.
 - `panels.js` — settings/debug panel toggles. No exports, self-wiring.
 - main.js — orchestrator + everything still too interleaved to split:
   speech (TTS lifecycle, fallback timing, `speakFrom`), mouth-tracking
@@ -308,14 +391,23 @@ Files: `index.html` + `main.js` + `gate-init.js` + `assets/intro/` (8 JPEGs,
 7 mp3s) + **`js/` (10 files — see module map, Section 3):**
 `readingState.js`, `cadence.js`, `storage.js`, `lighting.js`,
 `warningBox.js`, `voice.js`, `tone.js`, `tour.js`, `feedback.js`,
-`panels.js`. **Entries 45-55 all deployed to Vercel, confirmed live. Entry
-56: all 10 modules extracted, wired, deployed and tested live by student —
-running flawless.**
+`panels.js`. **Entries 45-56 all deployed to Vercel, confirmed live. Entry
+57: 3 bug fixes (calibration TTS gating, textarea/button clip on long
+paste, feedback cooldown reload bypass) deployed+tested live by student,
+all pass. 2 items parked (calibration-guide box placement → 3d #4; ambient
+border/warning-box distraction → 3d #4/#5), not forgotten, see Section 3.**
 
 **Next:** resume 3d build order at #2 (mobile highlighter fix). main.js
 modularization is closed out — speech/mouth-tracking/calibration
 deliberately stay unmodularized (see Section 3); revisit only if a future
 session has a concrete reason to, not by default.
+
+**New standing process (E57, see Section 2):** ask for specific module
+files at session start; strict modularization on new code; log updates
+show module connectivity; call out student testing mistakes directly
+instead of adapting around them; step-by-step testing always; small-ship
+reminder after major changes; flag long conversations for token
+conservation; watch for dead code.
 
 ## 6. Session index
 
@@ -349,3 +441,10 @@ E56 (Aug 15): main.js modularization, 10/14 pieces (module map → Section
   genuinely inseparable unit — left in main.js by design, not left undone.
   main.js 4272→2723 lines. All 10 modules deployed+tested live by student,
   confirmed flawless.
+E57 (Aug 15): New standing process rules adopted (Section 2/5). 5 bugs
+  triaged; 3 fixed this session (calibration TTS gating in `onWordClick`,
+  textarea/Load-button clip on long paste, feedback cooldown reload
+  bypass), 2 parked into existing future phases (calibration-guide box
+  placement, ambient-border/warning-box distraction) — see Section 3 for
+  full mechanism on each. All 3 fixes deployed+tested live by student, all
+  pass.
