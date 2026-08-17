@@ -1,0 +1,897 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Discrete Math & Probability — Your Cheat Sheet</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=DM+Mono:ital,wght@0,400;0,500;1,400&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,400&display=swap');
+
+  :root {
+    --bg: #0f0f0f;
+    --card: #161616;
+    --card2: #1c1c1c;
+    --border: #2a2a2a;
+    --accent1: #f0c14b;
+    --accent2: #e8715a;
+    --accent3: #5abbe8;
+    --accent4: #7be85a;
+    --accent5: #c45ae8;
+    --text: #f0ede8;
+    --muted: #888;
+    --tag-bg: #222;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    padding: 40px 24px;
+  }
+
+  .page {
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  /* HEADER */
+  .header {
+    text-align: center;
+    margin-bottom: 48px;
+    padding-bottom: 32px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .header h1 {
+    font-family: 'Syne', sans-serif;
+    font-size: 42px;
+    font-weight: 800;
+    letter-spacing: -1px;
+    background: linear-gradient(135deg, var(--accent1), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 8px;
+  }
+
+  .header p {
+    color: var(--muted);
+    font-size: 13px;
+    font-family: 'DM Mono', monospace;
+  }
+
+  /* MASTER TABLE */
+  .master-table-wrap {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 40px;
+  }
+
+  .section-title {
+    font-family: 'Syne', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--accent1);
+    margin-bottom: 16px;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  th {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--muted);
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #1e1e1e;
+    vertical-align: top;
+  }
+
+  tr:last-child td { border-bottom: none; }
+
+  .formula {
+    font-family: 'DM Mono', monospace;
+    font-size: 13px;
+    color: var(--accent1);
+    background: #1a1800;
+    padding: 2px 8px;
+    border-radius: 4px;
+    display: inline-block;
+  }
+
+  .tag {
+    display: inline-block;
+    font-size: 10px;
+    font-family: 'DM Mono', monospace;
+    padding: 2px 7px;
+    border-radius: 20px;
+    margin-right: 4px;
+    margin-bottom: 2px;
+  }
+
+  .tag.yes { background: #1a2e1a; color: var(--accent4); }
+  .tag.no  { background: #2e1a1a; color: var(--accent2); }
+
+  /* INSIGHT BOXES */
+  .insights {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 40px;
+  }
+
+  .insight-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .insight-box::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 3px;
+    height: 100%;
+    border-radius: 12px 0 0 12px;
+  }
+
+  .insight-box.yellow::before { background: var(--accent1); }
+  .insight-box.red::before    { background: var(--accent2); }
+  .insight-box.blue::before   { background: var(--accent3); }
+  .insight-box.green::before  { background: var(--accent4); }
+  .insight-box.purple::before { background: var(--accent5); }
+
+  .insight-box h3 {
+    font-family: 'Syne', sans-serif;
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .insight-box .emoji { font-size: 18px; }
+
+  .insight-box .your-words {
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+    font-style: italic;
+    margin-bottom: 10px;
+    padding: 6px 10px;
+    background: #111;
+    border-radius: 6px;
+  }
+
+  .insight-box ul {
+    list-style: none;
+    padding: 0;
+  }
+
+  .insight-box ul li {
+    font-size: 13px;
+    padding: 4px 0;
+    padding-left: 14px;
+    position: relative;
+    color: #ccc;
+  }
+
+  .insight-box ul li::before {
+    content: '→';
+    position: absolute;
+    left: 0;
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  /* 2 QUESTIONS BOX */
+  .two-questions {
+    background: linear-gradient(135deg, #1a1500, #0f0f0f);
+    border: 1px solid var(--accent1);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 40px;
+  }
+
+  .two-questions h2 {
+    font-family: 'Syne', sans-serif;
+    font-size: 18px;
+    font-weight: 800;
+    color: var(--accent1);
+    margin-bottom: 16px;
+  }
+
+  .q-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  .q-box {
+    background: #111;
+    border-radius: 8px;
+    padding: 16px;
+  }
+
+  .q-box .q-num {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    color: var(--accent1);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .q-box p {
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 10px;
+  }
+
+  .q-box .answers {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .q-box .answer-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    font-family: 'DM Mono', monospace;
+  }
+
+  .q-box .answer-row .cond {
+    color: var(--muted);
+    min-width: 160px;
+  }
+
+  .q-box .answer-row .result {
+    color: var(--accent1);
+  }
+
+  /* TOPIC SECTIONS */
+  .topics-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 40px;
+  }
+
+  .topic-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+  }
+
+  .topic-card .topic-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+
+  .topic-card h3 {
+    font-family: 'Syne', sans-serif;
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 12px;
+  }
+
+  .topic-card .story {
+    font-size: 12px;
+    color: #999;
+    font-style: italic;
+    margin-bottom: 12px;
+    padding: 8px 10px;
+    background: #111;
+    border-radius: 6px;
+    border-left: 2px solid var(--border);
+  }
+
+  .topic-card .formula-line {
+    margin: 6px 0;
+    font-size: 13px;
+  }
+
+  .topic-card .formula-line .label {
+    color: var(--muted);
+    font-size: 11px;
+    margin-bottom: 2px;
+  }
+
+  .topic-card .key-point {
+    margin-top: 10px;
+    font-size: 12px;
+    color: #aaa;
+    padding: 6px 10px;
+    background: #111;
+    border-radius: 6px;
+  }
+
+  .topic-card .key-point strong {
+    color: var(--text);
+  }
+
+  /* BAYES SPECIAL */
+  .bayes-section {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 40px;
+  }
+
+  .bayes-flow {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 16px 0;
+    flex-wrap: wrap;
+  }
+
+  .bayes-box {
+    background: #111;
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-align: center;
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+  }
+
+  .bayes-box .b-label {
+    color: var(--muted);
+    font-size: 10px;
+    margin-bottom: 4px;
+  }
+
+  .bayes-box .b-val {
+    color: var(--accent3);
+    font-size: 14px;
+    font-weight: 500;
+  }
+
+  .arrow {
+    color: var(--muted);
+    font-size: 18px;
+  }
+
+  /* PROBABILITY RULES */
+  .prob-rules {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 40px;
+  }
+
+  .rule-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px;
+  }
+
+  .rule-card h4 {
+    font-family: 'Syne', sans-serif;
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+
+  .rule-card .rule-formula {
+    font-family: 'DM Mono', monospace;
+    font-size: 12px;
+    color: var(--accent3);
+    background: #0f1a1f;
+    padding: 8px 10px;
+    border-radius: 6px;
+    margin-bottom: 8px;
+  }
+
+  .rule-card .rule-plain {
+    font-size: 12px;
+    color: #999;
+  }
+
+  /* COUNTABILITY */
+  .countability {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 40px;
+  }
+
+  .count-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-top: 16px;
+  }
+
+  .count-box {
+    border-radius: 8px;
+    padding: 16px;
+  }
+
+  .count-box.countable {
+    background: #0f1a0f;
+    border: 1px solid #1a3a1a;
+  }
+
+  .count-box.uncountable {
+    background: #1a0f0f;
+    border: 1px solid #3a1a1a;
+  }
+
+  .count-box h4 {
+    font-family: 'Syne', sans-serif;
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+
+  .count-box.countable h4 { color: var(--accent4); }
+  .count-box.uncountable h4 { color: var(--accent2); }
+
+  .count-box ul {
+    list-style: none;
+    font-size: 12px;
+    color: #aaa;
+  }
+
+  .count-box ul li {
+    padding: 3px 0;
+    padding-left: 14px;
+    position: relative;
+  }
+
+  .count-box ul li::before {
+    content: '•';
+    position: absolute;
+    left: 0;
+  }
+
+  /* BIRTHDAY / COUPON */
+  .paradox-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 40px;
+  }
+
+  /* FOOTER */
+  .footer {
+    text-align: center;
+    padding-top: 32px;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+  }
+
+  /* DIVIDERS */
+  .section-gap { margin-bottom: 40px; }
+
+  .full-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 16px;
+  }
+
+  code {
+    font-family: 'DM Mono', monospace;
+    background: #1a1a1a;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 12px;
+    color: var(--accent1);
+  }
+
+  @media print {
+    body { background: white; color: black; padding: 20px; }
+    .header h1 { -webkit-text-fill-color: #c8932a; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- HEADER -->
+  <div class="header">
+    <h1>Discrete Math & Probability</h1>
+    <p>// your personal cheat sheet — built on intuition, not memorization</p>
+  </div>
+
+  <!-- THE 2 QUESTIONS -->
+  <div class="two-questions">
+    <h2>⚡ The 2 Questions That Solve Everything</h2>
+    <div class="q-grid">
+      <div class="q-box">
+        <div class="q-num">Question 01</div>
+        <p>How many pools am I picking from?</p>
+        <div class="answers">
+          <div class="answer-row"><span class="cond">ONE pool</span><span class="arrow">→</span><span class="result">single C or P</span></div>
+          <div class="answer-row"><span class="cond">MANY separate pools</span><span class="arrow">→</span><span class="result">multiply them</span></div>
+        </div>
+      </div>
+      <div class="q-box">
+        <div class="q-num">Question 02</div>
+        <p>Does order matter?</p>
+        <div class="answers">
+          <div class="answer-row"><span class="cond">Yes + repetition allowed</span><span class="arrow">→</span><span class="result">nˢ</span></div>
+          <div class="answer-row"><span class="cond">Yes + no repetition</span><span class="arrow">→</span><span class="result">P</span></div>
+          <div class="answer-row"><span class="cond">No (identical objects)</span><span class="arrow">→</span><span class="result">C</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- YOUR OWN INSIGHTS -->
+  <p class="section-title">Your Own Insights (In Your Words)</p>
+  <div class="insights">
+    <div class="insight-box yellow">
+      <h3><span class="emoji">🔢</span> Arrangement Inside Arrangement</h3>
+      <div class="your-words">"it is basically arrangement inside arrangement"</div>
+      <ul>
+        <li>Multiple separate groups picking independently</li>
+        <li>Each group arranges within itself first</li>
+        <li>Then combine → MULTIPLY</li>
+        <li>Example: ³P₃ × ³P₂ × ³P₁ = 6 × 6 × 3 = 108</li>
+      </ul>
+    </div>
+    <div class="insight-box red">
+      <h3><span class="emoji">🚫</span> Canceling Arrangement Inside Arrangement</h3>
+      <div class="your-words">"canceling arrangement inside arrangement"</div>
+      <ul>
+        <li>Groups are indistinguishable from each other</li>
+        <li>Swapping groups creates duplicates</li>
+        <li>Remove duplicates → DIVIDE by groups!</li>
+        <li>Example: Split 10 into 5 groups → ÷ 5!</li>
+      </ul>
+    </div>
+    <div class="insight-box blue">
+      <h3><span class="emoji">🃏</span> C is Just Arranging Identical Objects</h3>
+      <div class="your-words">"C is just there because coincidentally formulas somehow make up"</div>
+      <ul>
+        <li>Choosing 2 positions = arranging identical bars</li>
+        <li>7! ÷ 5! ÷ 2! = ⁷C₂ — same thing!</li>
+        <li>C = shortcut for identical object arrangements</li>
+        <li>Stars & Bars uses C for this exact reason</li>
+      </ul>
+    </div>
+    <div class="insight-box green">
+      <h3><span class="emoji">💉</span> Bayes = Simultaneous Equations</h3>
+      <div class="your-words">"oh its just simultaneous equations"</div>
+      <ul>
+        <li>Pr[B|A] = Pr[A∩B] / Pr[A] → equation 1</li>
+        <li>Pr[A|B] = Pr[A∩B] / Pr[B] → equation 2</li>
+        <li>Both share Pr[A∩B] → solve and substitute!</li>
+        <li>GIVEN = what you SEE, FIND = hidden cause</li>
+      </ul>
+    </div>
+    <div class="insight-box purple">
+      <h3><span class="emoji">🔄</span> With/Without Replacement = Dependent/Independent</h3>
+      <div class="your-words">"my part matters when replaced, ur part matters when not replaced"</div>
+      <ul>
+        <li>With replacement → pool doesn't change → Independent → Pr[A] × Pr[B]</li>
+        <li>Without replacement → pool shrinks → Dependent → Pr[A] × Pr[B|A]</li>
+      </ul>
+    </div>
+    <div class="insight-box yellow">
+      <h3><span class="emoji">∞</span> Real Numbers = Zoom In Forever</h3>
+      <div class="your-words">"zoom out infinitely and new numbers keep emerging"</div>
+      <ul>
+        <li>Integers: infinite in ONE direction only</li>
+        <li>Real numbers: infinite in EVERY direction</li>
+        <li>Can always zoom in and find new numbers</li>
+        <li>That's why reals are Uncountable!</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- MASTER COUNTING TABLE -->
+  <p class="section-title">Master Counting Formula Table</p>
+  <div class="master-table-wrap section-gap">
+    <table>
+      <thead>
+        <tr>
+          <th>Situation</th>
+          <th>Repetition?</th>
+          <th>Order Matters?</th>
+          <th>Formula</th>
+          <th>Real Life Story</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Functions (S→T)</td>
+          <td><span class="tag yes">✅ Yes</span></td>
+          <td><span class="tag yes">✅ Yes</span></td>
+          <td><span class="formula">|T|^|S|</span></td>
+          <td>Each element in S picks freely from ALL of T every time</td>
+        </tr>
+        <tr>
+          <td>1-to-1 Functions</td>
+          <td><span class="tag no">❌ No</span></td>
+          <td><span class="tag yes">✅ Yes</span></td>
+          <td><span class="formula">n!</span></td>
+          <td>Once an output is taken, no one else can use it — pool shrinks!</td>
+        </tr>
+        <tr>
+          <td>Permutation (P)</td>
+          <td><span class="tag no">❌ No</span></td>
+          <td><span class="tag yes">✅ Yes</span></td>
+          <td><span class="formula">n!/(n-r)!</span></td>
+          <td>Arranging students in a line — Ali then Sara ≠ Sara then Ali</td>
+        </tr>
+        <tr>
+          <td>Combination (C)</td>
+          <td><span class="tag no">❌ No</span></td>
+          <td><span class="tag no">❌ No</span></td>
+          <td><span class="formula">n!/r!(n-r)!</span></td>
+          <td>Picking a team — {Ali, Sara} = {Sara, Ali}, same team!</td>
+        </tr>
+        <tr>
+          <td>Indistinguishable Groups</td>
+          <td><span class="tag no">❌ No</span></td>
+          <td><span class="tag no">❌ No</span></td>
+          <td><span class="formula">C ÷ k!</span></td>
+          <td>Split researchers into identical groups — swapping groups = same split</td>
+        </tr>
+        <tr>
+          <td>Stars & Bars (k people, n items)</td>
+          <td><span class="tag yes">✅ Yes</span></td>
+          <td><span class="tag no">❌ No</span></td>
+          <td><span class="formula">C(n+k-1, k-1)</span></td>
+          <td>Split $5 between people using bars as dividers — bars are identical!</td>
+        </tr>
+        <tr>
+          <td>Arrangement × Arrangement</td>
+          <td><span class="tag no">❌ No</span></td>
+          <td><span class="tag yes">✅ Yes</span></td>
+          <td><span class="formula">P₁ × P₂ × P₃</span></td>
+          <td>3 separate classes each arranging independently — multiply!</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- KEY FORMULAS -->
+  <p class="section-title">Key Formulas With Intuition</p>
+  <div class="topics-grid">
+
+    <div class="topic-card">
+      <div class="topic-label">Combinations</div>
+      <h3>C vs P — The Golden Rule</h3>
+      <div class="story">"P needs ÷ r! to fix it. C is already done — ready to use as is!"</div>
+      <div class="formula-line">
+        <div class="label">Permutation (order matters)</div>
+        <span class="formula">ⁿPᵣ = n! / (n-r)!</span>
+      </div>
+      <div class="formula-line" style="margin-top:8px">
+        <div class="label">Combination (order doesn't matter)</div>
+        <span class="formula">ⁿCᵣ = ⁿPᵣ / r!</span>
+      </div>
+      <div class="key-point"><strong>Never do ⁿCᵣ ÷ r!</strong> — the r! is already inside C!</div>
+    </div>
+
+    <div class="topic-card">
+      <div class="topic-label">Polygon Diagonals</div>
+      <h3>Diagonals in n-sided Polygon</h3>
+      <div class="story">"All possible lines between vertices, minus the sides themselves"</div>
+      <div class="formula-line">
+        <span class="formula">ⁿC₂ − n</span>
+      </div>
+      <div class="formula-line" style="margin-top:8px">
+        <span class="formula">= n(n-1)/2 − n</span>
+      </div>
+      <div class="key-point">
+        <strong>ⁿC₂</strong> = all lines between any 2 vertices<br>
+        <strong>−n</strong> = remove the n sides (not diagonals!)
+      </div>
+    </div>
+
+    <div class="topic-card">
+      <div class="topic-label">Pascal's Identity</div>
+      <h3>Pascal's Identity</h3>
+      <div class="story">"Alice is either IN or OUT — no in-between. Add both cases!"</div>
+      <div class="formula-line">
+        <span class="formula">C(n+1,k) = C(n,k) + C(n,k-1)</span>
+      </div>
+      <div class="key-point">
+        Alice OUT → pick k from remaining n → <code>C(n,k)</code><br>
+        Alice IN → pick k-1 from remaining n → <code>C(n,k-1)</code><br>
+        No overlap → just ADD!
+      </div>
+    </div>
+
+    <div class="topic-card">
+      <div class="topic-label">Inclusion-Exclusion</div>
+      <h3>Inclusion-Exclusion</h3>
+      <div class="story">"20 like cricket, 15 like football, 8 like both — subtract the overlap!"</div>
+      <div class="formula-line">
+        <div class="label">Two sets</div>
+        <span class="formula">|A∪B| = |A|+|B|−|A∩B|</span>
+      </div>
+      <div class="formula-line" style="margin-top:8px">
+        <div class="label">Three sets</div>
+        <span class="formula">|A∪B∪C| = |A|+|B|+|C| −|A∩B|−|A∩C|−|B∩C| +|A∩B∩C|</span>
+      </div>
+      <div class="key-point">Add all → subtract pairwise → <strong>add the middle back once!</strong></div>
+    </div>
+
+  </div>
+
+  <!-- PROBABILITY RULES -->
+  <p class="section-title">Probability Rules</p>
+  <div class="prob-rules">
+    <div class="rule-card">
+      <h4 style="color:var(--accent1)">Inclusion-Exclusion</h4>
+      <div class="rule-formula">Pr[A∪B] = Pr[A]+Pr[B]−Pr[A∩B]</div>
+      <div class="rule-plain">A OR B happening. Subtract overlap because it got counted twice!</div>
+    </div>
+    <div class="rule-card">
+      <h4 style="color:var(--accent3)">Product Rule</h4>
+      <div class="rule-formula">Pr[A∩B] = Pr[A] × Pr[B|A]</div>
+      <div class="rule-plain">A AND B both happening. Use Pr[B] only if independent (with replacement)!</div>
+    </div>
+    <div class="rule-card">
+      <h4 style="color:var(--accent4)">Total Probability</h4>
+      <div class="rule-formula">Pr[B] = Pr[A]×Pr[B|A] + Pr[Ā]×Pr[B|Ā]</div>
+      <div class="rule-plain">Don't know Pr[B]? Split into ALL scenarios and add them up!</div>
+    </div>
+  </div>
+
+  <!-- BAYES -->
+  <p class="section-title">Bayes' Rule — Flipping The Probability</p>
+  <div class="bayes-section section-gap">
+    <div class="story" style="font-size:13px; color:#999; font-style:italic; margin-bottom:16px; padding:10px; background:#111; border-radius:6px; border-left: 2px solid var(--accent5)">
+      "You SEE something (evidence) → you figure out the hidden CAUSE" — just two simultaneous equations sharing Pr[A∩B]!
+    </div>
+
+    <div class="bayes-flow">
+      <div class="bayes-box">
+        <div class="b-label">YOU KNOW</div>
+        <div class="b-val">Pr[B|A]</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="bayes-box">
+        <div class="b-label">YOU WANT</div>
+        <div class="b-val">Pr[A|B]</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="bayes-box">
+        <div class="b-label">BAYES GIVES YOU</div>
+        <div class="b-val">Pr[A] × Pr[B|A] / Pr[B]</div>
+      </div>
+    </div>
+
+    <div style="margin-top:16px; display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+      <div style="background:#111; border-radius:8px; padding:16px;">
+        <div style="font-family:'DM Mono',monospace; font-size:11px; color:var(--muted); margin-bottom:8px;">THE FORMULA</div>
+        <div style="font-family:'DM Mono',monospace; color:var(--accent5); font-size:13px;">Pr[A|B] = Pr[A] × Pr[B|A] / Pr[B]</div>
+        <div style="margin-top:10px; font-size:12px; color:#aaa;">
+          <strong style="color:var(--text)">Top</strong> = Pr[A∩B] = sick AND positive<br>
+          <strong style="color:var(--text)">Bottom</strong> = Pr[B] = everyone who tested positive (use Total Probability!)
+        </div>
+      </div>
+      <div style="background:#111; border-radius:8px; padding:16px;">
+        <div style="font-family:'DM Mono',monospace; font-size:11px; color:var(--muted); margin-bottom:8px;">MLE vs MAP</div>
+        <div style="font-size:12px; color:#aaa;">
+          <strong style="color:var(--accent2)">MLE</strong> = which cause fits evidence BEST (ignores rarity)<br><br>
+          <strong style="color:var(--accent4)">MAP</strong> = which cause is most likely after considering rarity<br><br>
+          <strong style="color:var(--text)">MAP = MLE + common sense!</strong>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- COUNTABILITY -->
+  <p class="section-title">Infinity & Countability</p>
+  <div class="countability section-gap">
+    <div style="font-size:13px; color:#999; margin-bottom:16px;">A set is <strong style="color:var(--accent4)">Countable</strong> if you can make a numbered list of all its elements. A set is <strong style="color:var(--accent2)">Uncountable</strong> if no list can ever capture all of it.</div>
+    <div class="count-grid">
+      <div class="count-box countable">
+        <h4>✅ Countable (same size as ℕ)</h4>
+        <ul>
+          <li>Natural Numbers ℕ = {0,1,2,3...}</li>
+          <li>Integers ℤ — list: 0,1,-1,2,-2,3,-3...</li>
+          <li>Fractions ℚ — zig-zag through the grid!</li>
+          <li>Pairs of Natural Numbers (ℕ×ℕ)</li>
+          <li>All Finite Strings</li>
+        </ul>
+      </div>
+      <div class="count-box uncountable">
+        <h4>❌ Uncountable (bigger than ℕ)</h4>
+        <ul>
+          <li>Real Numbers ℝ — zoom in forever, new numbers always appear!</li>
+          <li>Interval (0,1)</li>
+          <li>Power Set of ℕ</li>
+          <li>Cantor's Proof: always build a number that differs from every entry on the diagonal!</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- BIRTHDAY / CHECKSUMS / COUPON -->
+  <p class="section-title">Birthday Paradox, Checksums & Coupon Collector</p>
+  <div class="paradox-grid">
+    <div class="topic-card">
+      <div class="topic-label">Birthday Paradox</div>
+      <h3>🎂 Birthday Paradox</h3>
+      <div class="story">"Not 1 person vs everyone — it's 253 PAIRS all checking each other simultaneously!"</div>
+      <div class="formula-line">
+        <span class="formula">m ≈ 1.2√n</span>
+      </div>
+      <div class="key-point">
+        n = bins (365 days)<br>
+        m = items needed for 50% collision<br>
+        <strong>23 people → 50.7% chance!</strong>
+      </div>
+    </div>
+    <div class="topic-card">
+      <div class="topic-label">Checksums / Hashing</div>
+      <h3>💻 Checksums</h3>
+      <div class="story">"Birthday Paradox inside a computer — files are people, checksums are birthdays!"</div>
+      <div class="formula-line">
+        <span class="formula">b ≥ 2.9·ln(m) + 9</span>
+      </div>
+      <div class="key-point">
+        m = number of files<br>
+        b = bits needed in checksum<br>
+        <strong>For &lt;0.1% collision chance</strong>
+      </div>
+    </div>
+    <div class="topic-card">
+      <div class="topic-label">Coupon Collector</div>
+      <h3>🃏 Coupon Collector</h3>
+      <div class="story">"Opposite of Birthday Paradox — how long until you have ONE of everything?"</div>
+      <div class="formula-line">
+        <span class="formula">m ≈ n·ln(n)</span>
+      </div>
+      <div class="key-point">
+        n = total cards<br>
+        m = boxes needed to collect all<br>
+        <strong>Last few cards cost more than first 90 combined!</strong>
+      </div>
+    </div>
+  </div>
+
+  <!-- FOOTER -->
+  <div class="footer">
+    <p>built from YOUR understanding — every insight on this page came from you 🔥</p>
+  </div>
+
+</div>
+</body>
+</html>
