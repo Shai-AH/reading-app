@@ -555,55 +555,17 @@ if (debugSimulateNoBoundaryEl) {
 // THIS device/voice/rate, not a hand-picked value. Smoothed with an EMA so
 // one unusual utterance can't swing it wildly, and persisted to localStorage
 // so it keeps improving across sessions instead of resetting every reload.
-//
-// Entry 58: two real-device diagnostic runs (fallback-drift-diagnostic.html,
-// see PROGRESS.md) measured this ratio directly on mobile — 44 real words in
-// 13867ms (~315ms/word actual) against the fallback's own predicted pace of
-// ~531ms/word, a ratio of ~0.59-0.60. Two fixes follow from that, kept
-// separate on purpose:
-//   1. DEFAULT_FALLBACK_RATE_FACTOR moves from 1.0 to 0.6 — a fresh mobile
-//      install now starts close to correct instead of ~65% too slow. This is
-//      a data-informed prior from real measurement, not a guess, but it's
-//      also not claimed to be exact for every device/voice — the EMA below
-//      still does per-device fine-tuning on top of it, same as before.
-//   2. Convergence speed: natural completions are RARE in practice — each
-//      speakFrom() queues the ENTIRE REST of the text as one utterance, so
-//      "completes naturally" requires the reader's mouth to stay moving
-//      continuously all the way to the literal end of the document, not just
-//      to the end of a sentence. At the old fixed EMA_ALPHA=0.3, it took
-//      roughly 8-10 natural completions to close a 40% gap — and if natural
-//      completions themselves only happen a few times a session, that's
-//      multiple sessions before the correction is even close. Switched to a
-//      sample-count-aware alpha: the first real sample this device has ever
-//      recorded replaces the prior almost entirely (trust real data over an
-//      untested default), tapering down toward the old steady-state 0.3 once
-//      several real samples exist (so one unusual utterance still can't swing
-//      an already-well-calibrated device). Sample count persists alongside
-//      the factor so this correctly resumes "settled" on a returning user's
-//      device instead of re-doing fast convergence every session.
-//
-// Deliberately NOT extended to interrupted (mouth-close) stops: the only
-// candidate ground truth for "how many words were really spoken" on an
-// interrupted utterance is activeWordIndex — but that IS the fallback's own
-// (biased) belief about position, so calibrating against it would just teach
-// the factor to match its own error. Natural completion remains the only
-// trustworthy source; see PROGRESS.md Entry 58 for the full reasoning.
 const FALLBACK_RATE_STORAGE_KEY = 'readingAppFallbackRateFactor';
-const FALLBACK_RATE_SAMPLE_COUNT_STORAGE_KEY = 'readingAppFallbackRateSampleCount';
-const FALLBACK_RATE_STEADY_STATE_ALPHA = 0.3;
-const DEFAULT_FALLBACK_RATE_FACTOR = 0.6; // Entry 58 — see comment block above
-let fallbackRateFactor = DEFAULT_FALLBACK_RATE_FACTOR;
-let fallbackRateSampleCount = 0;
+const FALLBACK_RATE_EMA_ALPHA = 0.3;
+let fallbackRateFactor = 1.0;
 try {
   const savedFactor = parseFloat(localStorage.getItem(FALLBACK_RATE_STORAGE_KEY));
   // Sanity clamp: guard against a corrupted value or a wildly unrepresentative
   // early sample (e.g. a one-word utterance) ever making the factor unusable.
   if (!isNaN(savedFactor) && savedFactor >= 0.3 && savedFactor <= 3) {
     fallbackRateFactor = savedFactor;
-    const savedCount = parseInt(localStorage.getItem(FALLBACK_RATE_SAMPLE_COUNT_STORAGE_KEY), 10);
-    fallbackRateSampleCount = (!isNaN(savedCount) && savedCount > 0) ? savedCount : 1;
   }
-} catch (err) { /* localStorage unavailable — keep the default */ }
+} catch (err) { /* localStorage unavailable — keep the 1.0 default */ }
 const fallbackRateFactorValueEl = document.getElementById('fallbackRateFactorValue');
 if (fallbackRateFactorValueEl) fallbackRateFactorValueEl.textContent = fallbackRateFactor.toFixed(3);
 
@@ -621,19 +583,10 @@ function recordFallbackCalibrationSample(realElapsedMs, wordStartIdx) {
     console.log(`[fallback-calibration] discarded outlier sample: ratio ${observedRatio.toFixed(2)} (${Math.round(realElapsedMs)}ms real vs ${Math.round(predictedMs)}ms predicted)`);
     return;
   }
-  fallbackRateSampleCount += 1;
-  // Fast early convergence, tapering to the steady-state weight — see Entry
-  // 58 comment block above for why. alpha = 1 on the very first real sample
-  // (fully trust it over the untested default), 0.5 on the second, etc.,
-  // floored at the old fixed weight once enough samples exist.
-  const alpha = Math.max(FALLBACK_RATE_STEADY_STATE_ALPHA, 1 / fallbackRateSampleCount);
-  fallbackRateFactor = fallbackRateFactor * (1 - alpha) + observedRatio * alpha;
+  fallbackRateFactor = fallbackRateFactor * (1 - FALLBACK_RATE_EMA_ALPHA) + observedRatio * FALLBACK_RATE_EMA_ALPHA;
   if (fallbackRateFactorValueEl) fallbackRateFactorValueEl.textContent = fallbackRateFactor.toFixed(3);
-  try {
-    localStorage.setItem(FALLBACK_RATE_STORAGE_KEY, String(fallbackRateFactor));
-    localStorage.setItem(FALLBACK_RATE_SAMPLE_COUNT_STORAGE_KEY, String(fallbackRateSampleCount));
-  } catch (err) { /* ignore */ }
-  console.log(`[fallback-calibration] natural completion #${fallbackRateSampleCount}: ${Math.round(realElapsedMs)}ms real vs ${Math.round(predictedMs)}ms predicted (ratio ${observedRatio.toFixed(2)}, alpha ${alpha.toFixed(2)}) — fallbackRateFactor now ${fallbackRateFactor.toFixed(3)}`);
+  try { localStorage.setItem(FALLBACK_RATE_STORAGE_KEY, String(fallbackRateFactor)); } catch (err) { /* ignore */ }
+  console.log(`[fallback-calibration] natural completion: ${Math.round(realElapsedMs)}ms real vs ${Math.round(predictedMs)}ms predicted (ratio ${observedRatio.toFixed(2)}) — fallbackRateFactor now ${fallbackRateFactor.toFixed(3)}`);
 }
 
 // Clears any pending fallback-advance timer. Called whenever something else
