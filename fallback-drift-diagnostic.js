@@ -79,6 +79,7 @@ startBtn.addEventListener('click', () => {
   startBtn.disabled = true;
   stopBtn.disabled = false;
   tapBtn.disabled = false;
+  log(`[config] fallbackRateFactor = ${fallbackRateFactor} (if this doesn't match what you expect, the page is running a cached script — hard refresh / re-open the browser)`);
 
   utterance = new SpeechSynthesisUtterance(words.join(' '));
   utterance.rate = 1.0;
