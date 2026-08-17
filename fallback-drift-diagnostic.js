@@ -27,9 +27,9 @@ let utteranceStartTime = 0; // performance.now() at onstart (real ground-truth a
 let fallbackTimerId = null;
 let fallbackIdx = -1;          // 0-based index of the word the FALLBACK believes is current
 let boundaryEventCount = 0;    // mirrors main.js's confidence-guard counter, same sticky behavior
-let fallbackRateFactor = 0.6;  // Entry 58 fix under test — matches main.js's new
-                                // DEFAULT_FALLBACK_RATE_FACTOR (was 1.0). Fresh
-                                // each run deliberately — see note in chat.
+const DEFAULT_FALLBACK_RATE_FACTOR = 0.6; // Entry 58 fix under test — matches main.js's
+                                            // new DEFAULT_FALLBACK_RATE_FACTOR (was 1.0)
+let fallbackRateFactor = DEFAULT_FALLBACK_RATE_FACTOR;
 let fallbackLog = [];          // { idx, time } every time fallbackIdx advances
 let humanLog = [];             // { idx, time } every tap
 let running = false;
@@ -68,7 +68,7 @@ startBtn.addEventListener('click', () => {
 
   fallbackIdx = -1;
   boundaryEventCount = 0;
-  fallbackRateFactor = 1.0;
+  fallbackRateFactor = DEFAULT_FALLBACK_RATE_FACTOR; // was hardcoded 1.0 — bug, see chat
   fallbackLog = [];
   humanLog = [];
   logEl.innerHTML = '';
