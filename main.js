@@ -622,6 +622,113 @@ function recordFallbackCalibrationSample(realElapsedMs, wordStartIdx) {
   console.log(`[fallback-calibration] natural completion: ${Math.round(realElapsedMs)}ms real vs ${Math.round(predictedMs)}ms predicted (ratio ${observedRatio.toFixed(2)}) — fallbackRateFactor now ${fallbackRateFactor.toFixed(3)}`);
 }
 
+// --- Entry 60: silent calibration-phase probe for fallbackRateFactor -------
+// Confirmed necessary by runResumeOffsetDiagnostic(): with an uncorrected
+// factor, resume-after-mouth-close lag grows unbounded (2/4/6 words behind
+// across trials). With factor and true rate matched, the SAME diagnostic
+// showed a flat, non-growing ~1-word residual — an inherent tick-granularity
+// ceiling, not a bug. So getting fallbackRateFactor close to real is a real,
+// sufficient fix for both the highlighter-lag complaint and the resume-
+// position complaint, since they share this one root cause.
+//
+// Problem this probe solves: recordFallbackCalibrationSample() (above) only
+// fires on a NATURAL completion, and Entry 58 found those are rare in real
+// use — speakFrom() queues the entire rest of the document as one utterance,
+// so "completes naturally" needs uninterrupted mouth movement all the way to
+// the literal end of the text. Most sessions may never produce a sample,
+// leaving fallbackRateFactor stuck at 1.0 (or a prior session's stale value)
+// regardless of how wrong that is for this device/voice/rate. This probe
+// gets one real, grounded sample immediately, during calibration, instead
+// of waiting on a rare event.
+//
+// Deliberately mirrors testRateVoice()'s pattern (raw window.speechSynthesis
+// calls, not the app's speakFrom/iframe-recycle machinery) rather than
+// reusing speakFrom() — has to be fully isolated from wordSpans/
+// activeWordIndex/speakGeneration so it can never touch real reading state,
+// same isolation reason CLOCK_SELFTEST_ACTIVE exists for the clock
+// self-test. Muted (volume 0) so nothing audible happens without the user
+// asking for it — matches the project's no-forced-action rule, since this
+// runs automatically, not from a click.
+let fallbackProbeInProgress = false;
+
+// rate: the just-confirmed personalizedRate (see finishCalibration) — used
+// for utterance.rate so what's measured matches what will actually play
+// during real reading. predictedMs is computed from estimateWordDuration,
+// which by this point already reflects the same rate (setPersonalizedCadence
+// runs before this is called) — so both sides of the ratio are apples-to-
+// apples with the rate the user just chose.
+function runSilentFallbackProbe(rate) {
+  if (fallbackProbeInProgress || CLOCK_SELFTEST_ACTIVE) return;
+  if (!('speechSynthesis' in window)) return;
+
+  const words = SAMPLE_SENTENCE.match(/\S+/g) || [];
+  if (words.length === 0) return;
+  const predictedMs = words.reduce((sum, w) => sum + estimateWordDuration(w), 0);
+  if (predictedMs <= 0) return;
+
+  fallbackProbeInProgress = true;
+  let settled = false;
+  let startTime = null;
+  let timeoutId = null;
+
+  const finish = (elapsedMs) => {
+    if (settled) return;
+    settled = true;
+    if (timeoutId !== null) clearTimeout(timeoutId);
+    fallbackProbeInProgress = false;
+    if (elapsedMs === null) {
+      console.log('[fallback-probe] no result (timed out or failed) — fallbackRateFactor left untouched.');
+      return;
+    }
+    const observedRatio = elapsedMs / predictedMs;
+    if (observedRatio < 0.3 || observedRatio > 3) {
+      console.log(`[fallback-probe] discarded outlier: ratio ${observedRatio.toFixed(2)} (${Math.round(elapsedMs)}ms real vs ${Math.round(predictedMs)}ms predicted) — fallbackRateFactor left untouched.`);
+      return;
+    }
+    // Direct assignment, NOT an EMA blend like recordFallbackCalibrationSample
+    // uses for later natural completions. Deliberate: the EMA exists to
+    // protect an already-reasonable value from one unusual utterance; here
+    // the existing value is either the untested 1.0 default or a prior
+    // session's number, and this probe is a cleaner, more controlled
+    // measurement (fixed sentence, isolated from mouth-tracking/reading
+    // state) than what it's replacing — blending it partway toward the old
+    // value would just slow-walk toward the better number instead of using
+    // it immediately.
+    const previous = fallbackRateFactor;
+    fallbackRateFactor = observedRatio;
+    if (fallbackRateFactorValueEl) fallbackRateFactorValueEl.textContent = fallbackRateFactor.toFixed(3);
+    try { localStorage.setItem(FALLBACK_RATE_STORAGE_KEY, String(fallbackRateFactor)); } catch (err) { /* ignore */ }
+    console.log(`[fallback-probe] ${Math.round(elapsedMs)}ms real vs ${Math.round(predictedMs)}ms predicted (ratio ${observedRatio.toFixed(2)}) — fallbackRateFactor ${previous.toFixed(3)} -> ${fallbackRateFactor.toFixed(3)}`);
+  };
+
+  try {
+    const utterance = new SpeechSynthesisUtterance(SAMPLE_SENTENCE);
+    utterance.rate = rate;
+    utterance.volume = 0; // muted — this must never be audible, it wasn't asked for
+    const voice = resolveSelectedVoice(window.speechSynthesis);
+    if (voice) utterance.voice = voice;
+
+    utterance.onstart = () => { startTime = performance.now(); };
+    utterance.onend = () => {
+      finish(startTime === null ? null : performance.now() - startTime);
+    };
+    utterance.onerror = () => { finish(null); };
+
+    // Timeout floor generous enough for a slow device/voice to actually
+    // finish (3x predicted, same shape as the calibration wizard's own
+    // detection timeouts), capped so a stuck/never-firing engine can't hang
+    // this indefinitely.
+    const timeoutMs = Math.min(12000, Math.max(4000, predictedMs * 3));
+    timeoutId = setTimeout(() => finish(null), timeoutMs);
+
+    window.speechSynthesis.cancel(); // clear anything pending first, same as testRateVoice()
+    window.speechSynthesis.speak(utterance);
+  } catch (err) {
+    console.error('[fallback-probe] failed to start:', err);
+    finish(null);
+  }
+}
+
 // Clears any pending fallback-advance timer. Called whenever something else
 // is about to take over the highlight/resume position: a real onboundary
 // event, a manual cancel (mouth close / word click / hard reset), or the
@@ -1304,6 +1411,16 @@ function finishCalibration() {
   }
 
   applyCalibration(data);
+
+  // Entry 60: fire-and-forget, muted, runs in the background. Deliberately
+  // AFTER applyCalibration() so estimateWordDuration() inside the probe
+  // already reflects the rate/cadence just picked — see the probe's own
+  // comment block for why. Doesn't block or delay the "Saved" UI below.
+  // Held back until runResumeOffsetDiagnostic() confirmed a corrected
+  // factor is a sufficient fix (matched-shape test showed a flat, non-
+  // growing ~1-word residual instead of the unbounded growth an
+  // uncorrected factor produces) — now safe to wire in.
+  runSilentFallbackProbe(personalizedRate);
 
   calibrationStepEl.textContent = 'All done ✓';
   calActionBtnEl.style.display = 'none';
@@ -3042,3 +3159,196 @@ function runClockDecoupleSelfTest() {
   }
 }
 window.runClockDecoupleSelfTest = runClockDecoupleSelfTest;
+
+// --- Entry 60: resume-offset diagnostic -------------------------------------
+// Built to confirm/rule out a mechanism a student report surfaced after
+// Entry 59 deployed: on mouth-close then reopen, speech sometimes resumes
+// from BEHIND where it actually stopped ("reads from back").
+//
+// Hypothesis, from reading the code (not guessed): Entry 59 split
+// highlightWordAt() so lastWordBoundaryTime/currentSpokenWordExpectedMs (the
+// mouth-close CADENCE clock) can only be grounded-written. It did NOT touch
+// lastBoundaryOffset — a separate variable, still written by BOTH the real
+// onboundary handler AND scheduleFallbackAdvance's ungrounded fallback tick
+// (see the grep: line ~674 fallback, line ~2356 real). onMouthOpen()'s
+// resume position is computed directly from it:
+//   const resumeOffset = baseOffset + lastBoundaryOffset;
+// On a browser with unreliable/absent onboundary (mobile — confirmed 0/14
+// in earlier testing), lastBoundaryOffset is fallback-only for the whole
+// utterance. If the fallback's timing estimate lags behind where real
+// speech actually is (uncorrected fallbackRateFactor, see Entry 58's
+// measured ~0.6 ratio), lastBoundaryOffset lags too — so resume reads a
+// stale, earlier position. Same class of bug Entry 59 fixed, different
+// variable, never addressed.
+//
+// This doesn't need live mouth-tracking to test — onMouthClosed()/
+// onMouthOpen() are called directly, same seam runClockDecoupleSelfTest
+// uses for speakFrom(). Ground truth is defined by the test script itself
+// (a fixed simulated words-per-second the fallback never sees an onboundary
+// for), not measured from anything the app produces — so "true position at
+// close" is known by construction, not inferred.
+function runResumeOffsetDiagnostic(pinnedFactor, trueScale) {
+  const factorToUse = typeof pinnedFactor === 'number' && pinnedFactor > 0 ? pinnedFactor : 1.0;
+  // trueScale: how the SIMULATED real speech relates to estimateWordDuration's
+  // own syllable-weighted base — same shape, different constant, rather than
+  // the first version's flat per-word ms (which the "seven" vs "one"/"two"
+  // delay difference in the 0.44 run exposed as an unfair ground truth: real
+  // speech naturally varies with word length, so comparing it against a flat
+  // model manufactured a residual that wasn't really about drift). Defaults
+  // to matching factorToUse, i.e. "what if the factor were exactly right."
+  const scaleToUse = typeof trueScale === 'number' && trueScale > 0 ? trueScale : factorToUse;
+  const TEST_WORDS = ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve'];
+  const testText = TEST_WORDS.join(' ');
+
+  // Deliberately faster than the fallback's own raw per-word estimate
+  // (~340-560ms/word per Entry 59's self-test comments) — simulates the
+  // "real speech is faster than predicted" scenario Entry 58 measured
+  // directly (real ratio ~0.6), without claiming this exact number IS that
+  // ratio. The point is only that real < predicted, which is what makes
+  // lastBoundaryOffset lag in the first place.
+  //
+  // Same shape as the app's own estimate, scaled by scaleToUse — NOT a flat
+  // per-word constant (see the function-level comment on trueScale for why
+  // that mattered).
+  function trueWordDurationMs(word) {
+    return estimateWordDuration(word) * scaleToUse;
+  }
+
+  // Word indices to simulate a mouth-close at — early/mid/late, to also
+  // show whether the resume error grows the longer speech has been running
+  // (matching what was actually reported: "grows steadily worse").
+  const CLOSE_AT_WORD_INDICES = [3, 6, 9];
+
+  let resultsBox = document.getElementById('resumeOffsetDiagnosticResults');
+  if (!resultsBox) {
+    resultsBox = document.createElement('div');
+    resultsBox.id = 'resumeOffsetDiagnosticResults';
+    resultsBox.style.cssText = 'position:fixed;bottom:12px;left:12px;max-width:440px;background:#111;color:#eee;font:13px/1.4 monospace;padding:14px;border-radius:8px;z-index:99999;box-shadow:0 4px 18px rgba(0,0,0,0.4);white-space:pre-wrap;';
+    document.body.appendChild(resultsBox);
+  }
+  resultsBox.textContent = 'Running resume-offset diagnostic...';
+
+  const savedSynth = ttsEngine.synth;
+  const savedCtor = ttsEngine.UtteranceCtor;
+  const savedText = currentText;
+  const savedFallbackRateFactor = fallbackRateFactor;
+  fallbackRateFactor = factorToUse; // parameterized — see runResumeOffsetDiagnostic(pinnedFactor)
+
+  function FakeUtterance(text) {
+    this.text = text;
+    this.onboundary = null;
+    this.onstart = null;
+    this.onend = null;
+    this.voice = null;
+    this.pitch = 1;
+    this.rate = 1;
+  }
+
+  // Fallback-only synth: no scripted onboundary, ever. Mirrors mobile's
+  // confirmed 0/14 onboundary behavior — the exact condition under which
+  // lastBoundaryOffset becomes fallback-only for an entire utterance.
+  function makeFakeSynth() {
+    let speaking = false;
+    let timers = [];
+    return {
+      get speaking() { return speaking; },
+      speak(utterance) {
+        speaking = true;
+        timers.push(setTimeout(() => { if (speaking && utterance.onstart) utterance.onstart(); }, 0));
+      },
+      cancel() {
+        speaking = false;
+        timers.forEach(id => clearTimeout(id));
+        timers = [];
+      },
+    };
+  }
+
+  const results = [];
+
+  function runTrial(closeAtWordIdx, onDone) {
+    window.__clockWriteLog = [];
+    CLOCK_SELFTEST_ACTIVE = true;
+    setCurrentText(testText, 'self-test', { persist: false });
+    ttsEngine.synth = makeFakeSynth();
+    ttsEngine.UtteranceCtor = FakeUtterance;
+    setReadingActive(true);
+    speakFrom(0);
+
+    setTimeout(() => {
+      // Ground truth, by construction — not read from the app.
+      const trueWordIdx = closeAtWordIdx;
+
+      // What the app itself believes right now, purely from the (fallback-
+      // only, for this trial) lastBoundaryOffset — read directly since this
+      // diagnostic lives in the same module scope as speakFrom.
+      const believedOffset = baseOffset + lastBoundaryOffset;
+      const believedWordIdx = wordSpans.findIndex(w => believedOffset >= w.start && believedOffset < w.end);
+
+      onMouthClosed();
+      onMouthOpen(); // resumes synchronously via speakFrom(); activeWordIndex is set before this call returns
+
+      const resumedWordIdx = activeWordIndex;
+
+      results.push({
+        trueWordIdx,
+        believedWordIdx,
+        resumedWordIdx,
+        wordsBehind: trueWordIdx - resumedWordIdx,
+      });
+
+      // Hard-stop before the next trial — don't rely on onMouthClosed alone,
+      // this trial's fake synth may have a pending onstart timer from the
+      // resume's own speakFrom() call.
+      cancelActiveSpeech();
+      clearFallbackAdvance();
+      setIsSpeakingChunk(false);
+      setReadingActive(false);
+
+      setTimeout(onDone, 20);
+    }, TEST_WORDS.slice(0, closeAtWordIdx).reduce((sum, w) => sum + trueWordDurationMs(w), 0));
+  }
+
+  function runNext(i) {
+    if (i >= CLOSE_AT_WORD_INDICES.length) {
+      finishDiagnostic();
+      return;
+    }
+    runTrial(CLOSE_AT_WORD_INDICES[i], () => runNext(i + 1));
+  }
+
+  function finishDiagnostic() {
+    CLOCK_SELFTEST_ACTIVE = false;
+
+    const lines = results.map(r =>
+      `  • Closed at word #${r.trueWordIdx + 1} ("${TEST_WORDS[r.trueWordIdx]}") — fallback believed word #${r.believedWordIdx + 1}, resumed at word #${r.resumedWordIdx + 1} (${r.wordsBehind} word(s) behind true position)`
+    );
+    const anyBehind = results.some(r => r.wordsBehind > 0);
+    const summary = anyBehind
+      ? `Resume landed behind true position (fallbackRateFactor=${factorToUse}, trueScale=${scaleToUse}):\n${lines.join('\n')}\n\nNOTE: fallbackRateFactor and trueScale are now the SAME shape (both scale estimateWordDuration), so if this run used matching values and still shows divergence, that's real residual, not a flat-vs-weighted artifact — worth investigating further. Try runResumeOffsetDiagnostic(0.44, 0.44) for a fully matched baseline.`
+      : `No divergence this run (fallbackRateFactor=${factorToUse}, trueScale=${scaleToUse}) — resume matched true position in all ${results.length} trials:\n${lines.join('\n')}`;
+
+    console.log('[resume-offset diagnostic] ' + summary);
+    resultsBox.textContent = 'Entry 60 resume-offset diagnostic\n\n' + summary + '\n\n(Full log in console. Safe to dismiss — reload clears it.)';
+
+    ttsEngine.synth = savedSynth;
+    ttsEngine.UtteranceCtor = savedCtor;
+    fallbackRateFactor = savedFallbackRateFactor;
+    if (fallbackRateFactorValueEl) fallbackRateFactorValueEl.textContent = fallbackRateFactor.toFixed(3);
+    setIsSpeakingChunk(false);
+    setReadingActive(false);
+    clearFallbackAdvance();
+    if (typeof savedText === 'string' && savedText.length > 0) {
+      setCurrentText(savedText, 'restored (self-test cleanup)', { persist: false });
+    } else {
+      currentText = null;
+      wordSpans = [];
+      readingTextEl.innerHTML = '';
+      activeWordIndex = -1;
+      updateStartButtonState();
+    }
+  }
+
+  runNext(0);
+}
+window.runResumeOffsetDiagnostic = runResumeOffsetDiagnostic;
