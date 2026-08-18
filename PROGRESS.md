@@ -1,5 +1,5 @@
 # PROGRESS LOG — "Mumblew" (reading app)
-Last updated: Aug 15, 2026 (Entry 57)
+Last updated: Aug 18, 2026 (Entry 59)
 
 > This file = Claude's memory. Read first every session. Trust this file over
 > assumptions. Update before ending a session. Section 3 = decisions +
@@ -107,16 +107,160 @@ low-light > cadence-stall. `WARNING_BOX_MIN_DISPLAY_MS=3000`. Minimizable.
 always. Tuned: slow 230ms/syl+135ms base, fast 135ms/syl+62ms base. Gap:
 `estimateWordDuration()` has no punctuation/emphasis sense (formula limit).
 
-**Mobile highlighter — BUILT, NOT deployed, still broken (E55 confirmed
-live).** Cause: `onboundary` 0/14 on mobile (`tts-boundary-diagnostic.html`,
-not iframe-related). Fix: `scheduleFallbackAdvance`/`fallbackAdvanceTimerId`,
-real event always wins. `DEBUG_SIMULATE_NO_ONBOUNDARY` = desktop test toggle.
-Fixed 3 fallback timing bugs (punctuation jitter, first-word jitter →
-anchored to `onstart`, drift → EMA `fallbackRateFactor`/
-`readingAppFallbackRateFactor`). **Still needed: self-calibration retest +
-real mobile pass — never done.** Symptom per E55: highlighter stalls under
-playing TTS, catches up when TTS stops → fallback engages late/inconsistent,
-not absent. **Next major build item (E55).**
+**Mobile highlighter — BUILT, NOT deployed, still broken. Architecture bug
+(Entry 58) now FIXED and verified (Entry 59) — drift-tuning still not
+attempted, see below.** Original cause: `onboundary` 0/14 on mobile
+(`tts-boundary-diagnostic.html`, not iframe-related). Fix:
+`scheduleFallbackAdvance`/`fallbackAdvanceTimerId`, real event always wins.
+`DEBUG_SIMULATE_NO_ONBOUNDARY` = desktop test toggle. Fixed 3 fallback
+timing bugs (punctuation jitter, first-word jitter → anchored to `onstart`,
+drift → EMA `fallbackRateFactor`/`readingAppFallbackRateFactor`).
+
+**Entry 58 — drift measured with real numbers, fix attempted, reverted after
+a live regression, real root cause found.** New diagnostic tool built:
+`fallback-drift-diagnostic.html` + `.js` (standalone, not part of the app —
+imports the real `js/cadence.js` so it tests production math, not a
+reimplementation; human taps a button on every word heard as ground truth,
+since onboundary can't be trusted). Two real-device runs measured the drift
+directly: 44 real words spoken in 13867ms (~315ms/word actual) against the
+fallback's own predicted pace of ~531ms/word — a genuine ~0.59-0.60 ratio,
+confirming the compounding-lag theory with real numbers (drift climbed
+steadily word-over-word: -1,0,1,2,3,4,5,5,5,6,7,7,8,8,9,9,9,10,12 by word
+37) instead of guessing.
+
+Diagnostic build hit 3 of its own bugs before the numbers could be trusted —
+worth remembering as a class of mistake, not just fixed and forgotten:
+inline `<script>` silently blocked by this project's CSP (same class as
+`gate-init.js`, Entry 52 — moved to standalone `fallback-drift-diagnostic.js`
+loaded via `<script src>`); browser/CDN cache serving a stale `.js` after
+redeploy despite the raw file URL showing the update (fixed with a `?v=2`
+cache-busting query string + a `[config] fallbackRateFactor = ...` self-
+reporting log line printed at the start of every run, so future runs are
+self-verifying without a separate raw-file check); and a genuine copy-paste
+bug of Claude's own — the Start-button click handler had a leftover
+`fallbackRateFactor = 1.0` reset line from before the default changed,
+silently overwriting the fix on every run. Fixed by introducing
+`DEFAULT_FALLBACK_RATE_FACTOR` as the single source of truth both the
+declaration and the reset now reference, so declaration/reset can't drift
+apart again (same class of bug as E54's orphaned-declaration fix).
+
+**Fix attempted (shipped, then reverted same session):** `main.js`'s
+`fallbackRateFactor` default changed 1.0 → 0.6 (the measured ratio), plus
+`recordFallbackCalibrationSample`'s EMA changed from a fixed 0.3 alpha to a
+sample-count-aware alpha (1/n, floored at 0.3) so the first few real
+natural-completion samples converge fast instead of taking 8-10 completions
+to close a 40% gap — relevant because natural completions are rare in
+practice (each `speakFrom()` queues the ENTIRE REST of the text as one
+utterance, so "completes naturally" needs continuous mouth movement all the
+way to the literal end of the document, not just to a sentence end).
+Deliberately did NOT extend calibration to interrupted/mouth-close stops:
+the only candidate ground truth for words-actually-spoken on an interrupted
+utterance is `activeWordIndex`, but that IS the fallback's own biased
+belief — calibrating against it would teach the factor to match its own
+error, not correct it.
+
+**Live regression on deploy:** highlighter raced AHEAD of real TTS on
+mobile, and TTS itself intermittently stopped until the reader fully closed
+their mouth. Root cause, found by tracing the code (not guessed):
+`highlightWordAt()` — called from BOTH real onboundary events and fallback
+ticks, no distinction — resets `lastWordBoundaryTime`/
+`currentSpokenWordExpectedMs` every time it runs. Those two fields are the
+SAME clock `updateMouthState`'s mouth-close cadence gating (Fix 3c) reads to
+judge whether a still mouth means "word genuinely finished" or "mid-word,
+don't cut off." The fallback-advance highlighter and mouth-close detection
+were never actually independent — they share live state. Speeding up the
+fallback (0.6) meant that shared clock now resets far more often, for words
+that aren't really the one being spoken (fallback has no ground truth to
+race ahead responsibly), which corrupts the elapsed/expected comparison
+mouth-close detection depends on. **This is an architecture-level bug, not
+a tuning-level one** — no value of fallbackRateFactor is safe here, because
+an ungrounded timer feeding real detection state is the actual problem, not
+the specific speed it runs at. Reverted `main.js` to the exact pre-Entry-58
+version (byte-for-byte diffed against original to confirm) — deployed,
+confirmed stable again.
+
+**Entry 59 — part 1 (architecture decouple) DONE, verified. Part 2
+(drift-tuning) not started.** Split `highlightWordAt(charIndex)` into
+`moveHighlightTo(charIndex)` (display-only: active class, scroll,
+Phase-12d duplicate/gap diagnostics — safe to call from ANY source) and
+`highlightWordAt(charIndex)` (calls `moveHighlightTo` then sets
+`lastWordBoundaryTime`/`currentSpokenWordExpectedMs`/
+`currentWordRiskyTimings` — the clock mouth-close cadence gating reads).
+Fallback's call site (`scheduleFallbackAdvance`'s timer callback) now calls
+`moveHighlightTo` only. The two genuinely grounded call sites (real
+`onboundary` in `speakFrom`, word-click resync in `onWordClick`) still call
+the full `highlightWordAt`, unchanged. No other call sites needed to
+change.
+
+**Verification — `runClockDecoupleSelfTest()`, exposed on `window`, callable
+from the console with any text loaded.** Deliberately built to need zero
+human reaction time/perception (unlike the Entry 58 drift diagnostic, which
+measured PERCEIVED timing and needed a human ear) — this only asks a
+yes/no code-correctness question: does a clock field change when it
+shouldn't? Mechanism: swaps `ttsEngine.synth`/`UtteranceCtor` for a fake
+driver (same seam `spawnFreshTtsIframe` uses) that fires scripted
+`onstart`/`onboundary`/`onend` on exact millisecond timers instead of real
+audio — drives the REAL `speakFrom`/`highlightWordAt`/`moveHighlightTo`/
+`scheduleFallbackAdvance`, nothing reimplemented. Runs two isolated phases
+(not one interleaved run — see bug history below): Phase A sends zero
+scripted `onboundary` events, so the whole test sentence must advance via
+fallback alone (asserts zero grounded clock-writes); Phase B sends a
+scripted `onboundary` for every word 120ms apart, well under fallback's
+fastest delay, so a real event always cancels the pending fallback timer
+first (asserts every word grounded-written, zero fallback writes). Restores
+real `ttsEngine`, text, and `fallbackRateFactor` after. **Latest run: PASS,
+both phases clean.**
+
+**The self-test itself had 3 real bugs before its result could be trusted —
+worth remembering as its own class of mistake (same lesson as Entry 58's
+diagnostic-build bugs), not just fixed and forgotten:**
+1. `maybeRecycleTtsEngine()` fires unconditionally on a session's first
+   `speak()` call and reassigns `ttsEngine.synth`/`UtteranceCtor` directly
+   — the same two fields the self-test swaps out. It ran *inside*
+   `speakFrom()`, after the fake driver was installed but before the
+   utterance was constructed, silently overwriting the fake with a real
+   iframe's `speechSynthesis` — caused real audible TTS and real
+   `onboundary` events to fire for every word on the first run. Fixed: gated
+   behind `CLOCK_SELFTEST_ACTIVE`, same pattern as `DEBUG_SIMULATE_NO_ONBOUNDARY`.
+2. The fake driver's `onend` (and independently the existing 20ms
+   `speaking`-poll once the fake's `speaking` flips false) both route
+   through the REAL `handleStop`, which treats a scripted run as a genuine
+   natural completion and calls `recordFallbackCalibrationSample()` —
+   silently EMA'd synthetic test-sentence timing into the real, persisted
+   `fallbackRateFactor` in `localStorage`. Confirmed live: pushed a real
+   browser's stored factor to 1.901. Fixed: guarded
+   `recordFallbackCalibrationSample` itself (not just the test's driver,
+   since the poll path bypasses the driver entirely) behind
+   `CLOCK_SELFTEST_ACTIVE`.
+3. First test design used one interleaved run (alternating scripted
+   real/fallback word slots on a fixed timer). Broke because
+   `scheduleFallbackAdvance`'s 2.2x confidence-guard multiplier is INACTIVE
+   until the first real event lands (`boundaryEventCount>0`) — before that,
+   fallback chains at raw speed (~340-560ms/word here) and can race straight
+   past a sparsely-scheduled "real" event before it arrives, corrupting the
+   intended real/fallback word assignment. Fixed: rewritten as two fully
+   isolated phases (fallback-only, then real-only) that structurally cannot
+   race each other — no timing arithmetic to get right, same idea as the
+   Entry 58 drift diagnostic's own "ignore real boundary" toggle.
+
+**Not yet done:** real mobile pass to confirm no regression from the
+decoupling itself (separate question from drift correctness); drift-
+correction retuning (the `fallbackRateFactor` value/EMA-alpha work
+attempted and reverted in Entry 58) — now safe to attempt since a fast
+fallback can no longer corrupt mouth-close detection, but not attempted
+this entry. main.js not yet deployed this entry — student's call on
+deploy timing per Section 2 rule (ask about deploy status after any
+main.js-touching phase).
+
+**Secondary finding, not in scope this entry:** if a fallback's
+confidence-guarded delay estimate runs long enough, a real `onboundary` can
+arrive first and its `charIndex` can map to a word several indices ahead of
+`activeWordIndex` — the skipped word(s) in between never get a highlight at
+all (not corrupted, just never shown). Pre-existing behavior inherent to
+the confidence-guard's design, surfaced incidentally while debugging the
+self-test's own bug #3 above, not something Entry 59's fix touches. Revisit
+if/when drift-tuning is taken up, since retuning `fallbackRateFactor`
+changes how often this can occur.
 
 **Low-light — done, deployed.** Cause: ambient light degrades MediaPipe
 precision broadly (not threshold/anchor/fallback issue). Fix:
@@ -362,8 +506,13 @@ not just long ones.
 - [ ] Phase 8c: Offline mode — not started, PWA gives head start.
 - [x] Head-pose removed, ON/OFF switch + warning box shipped.
 - [x] Speed calibration rebuilt+tuned, ruled out as sticky-word cause.
-- [~] **Mobile highlighter fix — built, not deployed, confirmed still broken.
-      Next major build item.**
+- [~] **Mobile highlighter fix — architecture fix DONE + verified (Entry
+      59): fallback-advance's highlighting decoupled from mouth-close
+      detection's clock via `moveHighlightTo`/`highlightWordAt` split,
+      confirmed with an automated human-free self-test (2 isolated phases,
+      PASS). Drift-correction retuning (`fallbackRateFactor`) not yet
+      re-attempted — now safe to, not done this entry. Real mobile pass
+      (regression check, separate from drift) also not done this entry.**
 - [x] Low-light detection — shipped, deployed.
 - [x] Onboarding tour — deployed. **Being replaced w/ contextual hints.**
 - [x] Feedback widget — shipped, deployed.
@@ -391,16 +540,32 @@ Files: `index.html` + `main.js` + `gate-init.js` + `assets/intro/` (8 JPEGs,
 7 mp3s) + **`js/` (10 files — see module map, Section 3):**
 `readingState.js`, `cadence.js`, `storage.js`, `lighting.js`,
 `warningBox.js`, `voice.js`, `tone.js`, `tour.js`, `feedback.js`,
-`panels.js`. **Entries 45-56 all deployed to Vercel, confirmed live. Entry
-57: 3 bug fixes (calibration TTS gating, textarea/button clip on long
-paste, feedback cooldown reload bypass) deployed+tested live by student,
-all pass. 2 items parked (calibration-guide box placement → 3d #4; ambient
-border/warning-box distraction → 3d #4/#5), not forgotten, see Section 3.**
+`panels.js`. Plus, since Entry 58: `fallback-drift-diagnostic.html` and
+`fallback-drift-diagnostic.js` — standalone diagnostic tool, deployed
+alongside the app (not imported by anything in `js/` or main.js; only
+dependency is importing `js/cadence.js` directly). Safe to leave deployed
+(inert unless opened directly) or remove once the mobile-highlighter work
+concludes — student's call.
 
-**Next:** resume 3d build order at #2 (mobile highlighter fix). main.js
-modularization is closed out — speech/mouth-tracking/calibration
-deliberately stay unmodularized (see Section 3); revisit only if a future
-session has a concrete reason to, not by default.
+**Entries 45-57 all deployed to Vercel, confirmed live. Entry 58: main.js
+fix attempted and reverted same session — byte-identical to pre-Entry-58,
+confirmed via diff, deployed, confirmed stable. Entry 59: architecture fix
+(moveHighlightTo/highlightWordAt split) + runClockDecoupleSelfTest() built
+into main.js, verified PASS via console — NOT YET DEPLOYED this entry,
+student's call on timing.** 2 items parked from E57 (calibration-guide box
+placement → 3d #4; ambient border/warning-box distraction → 3d #4/#5), not
+forgotten, see Section 3.
+
+**Next:** deploy Entry 59's main.js, then a real mobile pass to confirm the
+decoupling itself introduced no regression (separate question from drift
+correctness — mobile pass isn't about drift yet). Once confirmed stable,
+safe to revisit `fallbackRateFactor` tuning (the value/EMA-alpha work
+attempted and reverted in Entry 58) — the clock can no longer be corrupted
+by a fast fallback regardless of how wrong the tuning value is, so this is
+now a pure tuning problem, not an architecture one. main.js modularization
+remains closed out separately (speech/mouth-tracking/calibration
+deliberately unmodularized, see Section 3); this coupling bug lived in that
+same unmodularized region, split fully documented in Entry 59.
 
 **New standing process (E57, see Section 2):** ask for specific module
 files at session start; strict modularization on new code; log updates
@@ -448,3 +613,28 @@ E57 (Aug 15): New standing process rules adopted (Section 2/5). 5 bugs
   placement, ambient-border/warning-box distraction) — see Section 3 for
   full mechanism on each. All 3 fixes deployed+tested live by student, all
   pass.
+E58 (Aug 16): Mobile highlighter drift measured with real device numbers
+  (new tool: fallback-drift-diagnostic.html/.js). Fix attempted
+  (fallbackRateFactor default 1.0→0.6 + faster EMA convergence) — caused a
+  live regression (highlighter raced ahead, TTS intermittently stopped).
+  Traced to real root cause: fallback-advance highlighting and mouth-close
+  cadence detection share a live clock (lastWordBoundaryTime/
+  currentSpokenWordExpectedMs) via highlightWordAt() — architecture-level
+  coupling bug, not a tuning problem. Reverted main.js to pre-session state
+  (byte-diff confirmed), deployed, confirmed stable. See Section 3 for full
+  mechanism. Next session: decouple the shared clock before any further
+  drift-correction tuning.
+E59 (Aug 18): Mobile highlighter architecture fix built + verified. Split
+  highlightWordAt() into display-only moveHighlightTo() + a thin grounded
+  wrapper that sets the clock; fallback's call site now calls
+  moveHighlightTo() only. Built runClockDecoupleSelfTest() (exposed on
+  window) — fully automated, no human reaction time needed, unlike Entry
+  58's drift diagnostic. 3 real bugs in the self-test itself caught and
+  fixed before trusting its result (recycle-guard swapping the fake TTS
+  driver out from under the test; fake driver's natural-completion path
+  silently writing synthetic timing into real persisted fallbackRateFactor;
+  first test design racing fallback against a sparse real-event schedule —
+  rewritten as 2 isolated phases). Final run: PASS, both phases clean. See
+  Section 3 for full mechanism + bug history. NOT deployed this entry —
+  student's call. Next: deploy, real mobile regression pass, then
+  fallbackRateFactor retuning is safe to attempt.

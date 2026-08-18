@@ -483,6 +483,17 @@ function spawnFreshTtsIframe() {
 // sessionSpeakCallCount + 1.
 function maybeRecycleTtsEngine() {
   if (!IFRAME_TTS_RECYCLE_ENABLED) return;
+  // Entry 58 self-test fix: this function reassigns ttsEngine.synth/
+  // UtteranceCtor directly (spawnFreshTtsIframe below), same two fields the
+  // self-test swaps out for its scripted fake driver. Recycling fires on
+  // the very first speak() of a session unconditionally (nextCallNumber
+  // === 1) — which is exactly what a self-test run is — so without this
+  // guard it silently overwrote the fake with a REAL iframe's speechSynthesis
+  // right before speakFrom() constructs currentUtterance, causing actual
+  // TTS audio and real onboundary events to fire for every word instead of
+  // the scripted subset. Caught by reading the self-test's own console
+  // output, not guessed.
+  if (CLOCK_SELFTEST_ACTIVE) return;
   const nextCallNumber = sessionSpeakCallCount + 1;
   if (nextCallNumber === 1 || (nextCallNumber - 1) % IFRAME_RECYCLE_EVERY_N_CALLS === 0) {
     spawnFreshTtsIframe();
@@ -542,6 +553,13 @@ if (debugSimulateNoBoundaryEl) {
   });
 }
 
+// Entry 58 clock-decouple self-test: off unless runClockDecoupleSelfTest()
+// (exposed on window, see bottom of file) is actively running. When true,
+// highlightWordAt()/scheduleFallbackAdvance's fallback branch push tagged
+// entries to window.__clockWriteLog instead of doing nothing extra — cheap,
+// and inert in normal use since this stays false.
+let CLOCK_SELFTEST_ACTIVE = false;
+
 // --- Self-calibrating fallback rate factor ----------------------------------
 // Answers the "stop guessing constants" ask directly: rather than a fixed
 // multiplier, this is MEASURED from real data every time an utterance
@@ -572,6 +590,21 @@ if (fallbackRateFactorValueEl) fallbackRateFactorValueEl.textContent = fallbackR
 // Called from handleStop only on a NATURAL completion (see speakFrom) —
 // updates fallbackRateFactor from this utterance's real-vs-predicted ratio.
 function recordFallbackCalibrationSample(realElapsedMs, wordStartIdx) {
+  // Self-test guard (added after the fix was caught contaminating real
+  // calibration data): the self-test's fake driver still ends via the REAL
+  // handleStop() path (its onend call, and independently the speaking-poll
+  // once `speaking` flips false) — both treat a scripted test run as a
+  // genuine natural completion and would otherwise EMA a synthetic
+  // test-sentence timing ratio into the real, persisted fallbackRateFactor.
+  // Confirmed via a live run: this is what pushed a real browser's stored
+  // factor to 1.901. No calibration writes may happen while a self-test is
+  // active, full stop — this has to be checked here, not just in the
+  // self-test's own driver, since the poll path never goes through the
+  // self-test's code at all.
+  if (CLOCK_SELFTEST_ACTIVE) {
+    console.log('[clock-decouple self-test] blocked a calibration write that would have used synthetic test timing — real fallbackRateFactor left untouched.');
+    return;
+  }
   if (wordStartIdx === -1 || wordStartIdx >= wordSpans.length) return;
   let predictedMs = 0;
   for (let i = wordStartIdx; i < wordSpans.length; i++) {
@@ -623,8 +656,14 @@ function scheduleFallbackAdvance(forWordIndex, generation) {
   // estimate instead, so the highlighter doesn't lag noticeably behind.
   if (boundaryEventCount > 0) delayMs *= 2.2;
   delayMs = Math.max(60, delayMs); // small floor so a near-zero estimate can't fire instantly
+  if (CLOCK_SELFTEST_ACTIVE) {
+    console.log(`[fallback-schedule] set for word after "${wordText}" (idx ${forWordIndex}->${forWordIndex + 1}), delay=${Math.round(delayMs)}ms, boundaryEventCount=${boundaryEventCount}, fallbackRateFactor=${fallbackRateFactor.toFixed(3)}`);
+  }
   fallbackAdvanceTimerId = setTimeout(() => {
     fallbackAdvanceTimerId = null;
+    if (CLOCK_SELFTEST_ACTIVE) {
+      console.log(`[fallback-fire-attempt] idx ${forWordIndex}->${forWordIndex + 1}: generation ${generation === speakGeneration ? 'OK' : 'STALE'}, isSpeakingChunk=${getIsSpeakingChunk()}, activeWordIndex=${activeWordIndex} (expected ${forWordIndex})`);
+    }
     if (generation !== speakGeneration) return; // this utterance was superseded/cancelled — stale timer
     if (!getIsSpeakingChunk()) return; // speech already stopped — don't advance past where it actually stopped
     if (activeWordIndex !== forWordIndex) return; // a real boundary (or another fallback tick) already moved us on
@@ -633,7 +672,16 @@ function scheduleFallbackAdvance(forWordIndex, generation) {
     if (fallbackAdvanceCountValueEl) fallbackAdvanceCountValueEl.textContent = String(fallbackAdvanceCount);
     console.log(`[fallback-highlight] no onboundary for "${wordSpans[forWordIndex].span.textContent}" within ${Math.round(delayMs)}ms — advancing on estimate instead`);
     lastBoundaryOffset = wordSpans[nextIdx].start - baseOffset;
-    highlightWordAt(baseOffset + lastBoundaryOffset);
+    // Entry 58 fix: moveHighlightTo(), NOT highlightWordAt(). This is an
+    // ungrounded guess (no real event confirmed this word), so it must move
+    // the visible highlight WITHOUT resetting lastWordBoundaryTime/
+    // currentSpokenWordExpectedMs — those belong exclusively to grounded
+    // sources now (real onboundary, or a genuine user action like word-click
+    // resync). See the comment block above moveHighlightTo()'s definition.
+    moveHighlightTo(baseOffset + lastBoundaryOffset);
+    if (CLOCK_SELFTEST_ACTIVE) {
+      window.__clockWriteLog.push({ source: 'fallback', word: wordSpans[nextIdx].span.textContent, idx: nextIdx, t: performance.now() });
+    }
     scheduleFallbackAdvance(nextIdx, generation); // keep the chain going for the word after this one
   }, delayMs);
 }
@@ -1819,35 +1867,45 @@ function onWordClick(wordIndex) {
   }
 }
 
-function highlightWordAt(charIndex) {
+// Entry 58 architecture fix: highlightWordAt() used to do two unrelated
+// jobs at once — (1) move the visible highlight/resume point, and (2) reset
+// the per-word clock (lastWordBoundaryTime/currentSpokenWordExpectedMs)
+// that updateMouthState() reads to judge whether a still mouth means "word
+// genuinely finished" or "mid-word, don't cut off." Both the REAL onboundary
+// handler and the FALLBACK timer (scheduleFallbackAdvance, an ungrounded
+// guess) called this same function, so a fallback tick was silently
+// resetting a clock that's supposed to mean "a real event just confirmed
+// this." That's what caused the Entry 58 live regression when the fallback
+// was sped up: the clock started resetting for words that weren't actually
+// the one being spoken, corrupting mouth-close detection.
+//
+// Fix: split into two layers.
+//   moveHighlightTo()  — display only (active class, scroll, diagnostic
+//                         log). Safe to call from ANY source, grounded or
+//                         not — this is what scheduleFallbackAdvance calls
+//                         now, instead of highlightWordAt.
+//   highlightWordAt()  — moveHighlightTo() + the clock reset. Only called
+//                         from genuinely grounded sources: the real
+//                         onboundary handler in speakFrom, and speakFrom's
+//                         own resume-priming (which sets the clock inline,
+//                         not through this function, since a resume isn't
+//                         a "word changed" event).
+// No other call sites needed to change — real onboundary already called
+// highlightWordAt() and should keep doing exactly that.
+function moveHighlightTo(charIndex) {
   const idx = wordSpans.findIndex(w => charIndex >= w.start && charIndex < w.end);
-  if (idx === -1) return;
+  if (idx === -1) return -1;
 
-  // Phase 12d diagnostic: a boundary event landed but mapped into the
+  // Phase 12d diagnostic: a boundary/advance landed but mapped into the
   // SAME word that's already active — either a genuinely duplicate event
   // for one word, or evidence the browser's charIndex for this word drifted
-  // backward/stayed put instead of advancing. Either way it means this
-  // boundary did NOT refresh lastWordBoundaryTime/currentSpokenWordExpectedMs,
-  // which is exactly the kind of gap that could read as a "stall."
+  // backward/stayed put instead of advancing.
   if (idx === activeWordIndex) {
     duplicateBoundaryCount += 1;
     duplicateBoundaryValueEl.textContent = String(duplicateBoundaryCount);
     console.log(`[Phase 12d diag] duplicate/non-advancing boundary for already-active word "${wordSpans[idx].span.textContent}" (charIndex=${charIndex})`);
-    return;
+    return -1;
   }
-
-  // Phase 12d diagnostic: how long did THIS word's boundary event actually
-  // take to arrive, vs. how long the PREVIOUS word was expected to take?
-  // A stall shows up here as gapMs far exceeding prevExpectedMs, tagged
-  // with exactly which word it landed on.
-  const nowForDiag = performance.now();
-  const prevExpectedMs = getCurrentSpokenWordExpectedMs();
-  const gapMs = Math.round(nowForDiag - getLastWordBoundaryTime());
-  const newWordText = wordSpans[idx].span.textContent;
-  console.log(`[Phase 12d diag] boundary -> "${newWordText}" | gap since prev boundary: ${gapMs}ms (prev word expected ~${Math.round(prevExpectedMs)}ms)`);
-  lastWordTextValueEl.textContent = newWordText;
-  lastWordGapValueEl.textContent = `${gapMs}ms`;
-  lastWordExpectedValueEl.textContent = `${Math.round(prevExpectedMs)}ms`;
 
   if (activeWordIndex !== -1) {
     wordSpans[activeWordIndex].span.classList.remove('active');
@@ -1865,6 +1923,29 @@ function highlightWordAt(charIndex) {
     scrollToActiveWord();
   }
 
+  return idx;
+}
+
+function highlightWordAt(charIndex) {
+  // Phase 12d diagnostic: how long did THIS word's boundary event actually
+  // take to arrive, vs. how long the PREVIOUS word was expected to take?
+  // A stall shows up here as gapMs far exceeding prevExpectedMs, tagged
+  // with exactly which word it landed on. Computed BEFORE moveHighlightTo()
+  // so it still reflects the previous word's numbers, same as before the split.
+  const nowForDiag = performance.now();
+  const prevExpectedMs = getCurrentSpokenWordExpectedMs();
+  const prevBoundaryTime = getLastWordBoundaryTime();
+
+  const idx = moveHighlightTo(charIndex);
+  if (idx === -1) return; // no match, or duplicate/non-advancing — moveHighlightTo already logged it
+
+  const gapMs = Math.round(nowForDiag - prevBoundaryTime);
+  const newWordText = wordSpans[idx].span.textContent;
+  console.log(`[Phase 12d diag] boundary -> "${newWordText}" | gap since prev boundary: ${gapMs}ms (prev word expected ~${Math.round(prevExpectedMs)}ms)`);
+  lastWordTextValueEl.textContent = newWordText;
+  lastWordGapValueEl.textContent = `${gapMs}ms`;
+  lastWordExpectedValueEl.textContent = `${Math.round(prevExpectedMs)}ms`;
+
   // Phase 11b bugfix: per-word cadence clock, independent of mouthOpenStartTime.
   // mouthOpenStartTime only resets on a closed->open transition, which during
   // smooth continuous reading can span many words (Phase 6a smoothing keeps
@@ -1875,9 +1956,18 @@ function highlightWordAt(charIndex) {
   // right clock here — and as a side benefit, this now doubles as a live
   // detector for a frozen/stalled TTS engine (the documented Chromium
   // freeze bug, Section 3) rather than reader-mouth behavior.
+  //
+  // Entry 58: this is now ONLY reached from grounded call sites (see the
+  // comment above moveHighlightTo). A fallback-advance tick moves the
+  // highlight via moveHighlightTo() directly and never reaches here, so it
+  // can no longer reset this clock.
   setLastWordBoundaryTime(performance.now());
   setCurrentSpokenWordExpectedMs(estimateWordDuration(wordSpans[idx].span.textContent));
   currentWordRiskyTimings = estimateRiskyConsonantTimings(wordSpans[idx].span.textContent, getCurrentSpokenWordExpectedMs());
+
+  if (CLOCK_SELFTEST_ACTIVE) {
+    window.__clockWriteLog.push({ source: 'grounded', word: newWordText, idx, t: performance.now() });
+  }
 }
 
 // Extract yaw/pitch (in degrees) from MediaPipe's facialTransformationMatrix.
@@ -2745,3 +2835,210 @@ initFeedbackWidget(() => {
 // — no deferred call needed here, unlike the old invite-card version.
 
 setup();
+
+// --- Entry 58 clock-decouple self-test -------------------------------------
+// Verifies the highlightWordAt()/moveHighlightTo() split (see the big
+// comment block above moveHighlightTo()'s definition) WITHOUT depending on
+// a human's ear or reaction time at all. The drift diagnostic (Entry 58,
+// fallback-drift-diagnostic.js) needed a human tap because it measured
+// PERCEIVED timing — how far the highlighter lagged what a person actually
+// heard. This test measures something different and fully mechanical:
+// "does the mouth-close clock get written on a fallback-only tick?" — a
+// yes/no the code itself can answer, if the TTS timing is scripted instead
+// of real audio.
+//
+// How: swap ttsEngine.synth/UtteranceCtor for a fake driver that fires
+// onstart/onboundary/onend at EXACT, hand-picked millisecond offsets — some
+// words get a scripted onboundary (a "real" event), others are deliberately
+// skipped so the app's own real scheduleFallbackAdvance() timer, running
+// unmodified, has to step in. This calls the REAL production functions
+// (speakFrom, highlightWordAt, moveHighlightTo, scheduleFallbackAdvance) —
+// nothing here is a reimplementation, avoiding the "harness has its own
+// bugs" trap (E41) and the "diagnostic reimplements instead of importing
+// real logic" gap the drift diagnostic was built to avoid.
+//
+// Usage: open the app, open the browser console, run
+//   runClockDecoupleSelfTest()
+// Results print on-screen (a floating box, plain English) AND to console.
+// Safe to run repeatedly; fully restores ttsEngine and text state after.
+function runClockDecoupleSelfTest() {
+  const TEST_WORDS = ['Alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel', 'india', 'juliet'];
+  const testText = TEST_WORDS.join(' ');
+  // Index 0 is primed directly by speakFrom()'s resume logic (not through
+  // highlightWordAt), by design — excluded from both phases' assertions,
+  // since that priming path isn't what this fix touches.
+
+  // Redesigned after a live run exposed a real flaw in the first version:
+  // before ANY real onboundary has landed, boundaryEventCount is still 0,
+  // so scheduleFallbackAdvance's 2.2x confidence-guard multiplier is
+  // INACTIVE — fallback chains through several words at raw speed
+  // (~340-560ms each) and can race straight past a sparsely-scheduled
+  // "real" event before it ever arrives. Rather than hand-tuning timing to
+  // dodge that race, this now runs two phases that structurally cannot
+  // race each other at all — same idea as the drift diagnostic's own
+  // "ignore real boundary" toggle, just split into two separate passes:
+  //   Phase A (fallback-only): never send a single scripted onboundary.
+  //     The ENTIRE utterance must advance via fallback alone. Assert: not
+  //     one word gets a grounded clock-write.
+  //   Phase B (real-only): send a scripted onboundary for EVERY word,
+  //     spaced well under fallback's fastest possible delay, so a real
+  //     event always cancels the pending fallback timer before it can
+  //     fire. Assert: every word gets a grounded write and zero fallback
+  //     writes.
+  // Each phase in isolation is unambiguous — no timing arithmetic to get
+  // right, no confidence-guard interaction to model.
+
+  let resultsBox = document.getElementById('clockSelfTestResults');
+  if (!resultsBox) {
+    resultsBox = document.createElement('div');
+    resultsBox.id = 'clockSelfTestResults';
+    resultsBox.style.cssText = 'position:fixed;bottom:12px;right:12px;max-width:420px;background:#111;color:#eee;font:13px/1.4 monospace;padding:14px;border-radius:8px;z-index:99999;box-shadow:0 4px 18px rgba(0,0,0,0.4);white-space:pre-wrap;';
+    document.body.appendChild(resultsBox);
+  }
+  resultsBox.textContent = 'Running clock-decouple self-test (phase A: fallback-only)...';
+
+  const savedSynth = ttsEngine.synth;
+  const savedCtor = ttsEngine.UtteranceCtor;
+  const savedText = currentText;
+  const savedFallbackRateFactor = fallbackRateFactor;
+
+  // Pin fallbackRateFactor — a real, persisted, per-browser value — so the
+  // test's pass/fail depends only on the decoupling mechanism, not on
+  // whatever this happens to currently be (a prior run found an un-pinned
+  // 1.901 producing a false timing-based failure unrelated to the fix).
+  fallbackRateFactor = 1.0;
+
+  function FakeUtterance(text) {
+    this.text = text;
+    this.onboundary = null;
+    this.onstart = null;
+    this.onend = null;
+    this.voice = null;
+    this.pitch = 1;
+    this.rate = 1;
+  }
+
+  // scriptFn(utterance, starts) => nothing; schedules whatever onboundary/
+  // onend calls this phase needs via setTimeout, using `speaking` to no-op
+  // after cancel().
+  function makeFakeSynth(scriptFn) {
+    let speaking = false;
+    let timers = [];
+    const synth = {
+      get speaking() { return speaking; },
+      speak(utterance) {
+        speaking = true;
+        timers.push(setTimeout(() => { if (speaking && utterance.onstart) utterance.onstart(); }, 0));
+        scriptFn(utterance, () => speaking, (fn, atMs) => timers.push(setTimeout(fn, atMs)));
+      },
+      cancel() {
+        speaking = false;
+        timers.forEach(id => clearTimeout(id));
+        timers = [];
+      },
+    };
+    return synth;
+  }
+
+  function runPhase(label, scriptFn, onDone) {
+    window.__clockWriteLog = [];
+    CLOCK_SELFTEST_ACTIVE = true;
+    setCurrentText(testText, 'self-test', { persist: false });
+    const starts = wordSpans.map(w => w.start);
+    ttsEngine.synth = makeFakeSynth((utterance, isSpeaking, schedule) => scriptFn(utterance, starts, isSpeaking, schedule, onDone));
+    ttsEngine.UtteranceCtor = FakeUtterance;
+    setReadingActive(true);
+    speakFrom(0);
+  }
+
+  // Phase A: fallback-only. No onboundary calls at all — just end the
+  // utterance generously after the fallback chain has had time to run the
+  // whole text (raw/unguarded speed, ~340-560ms/word here, well under 6s
+  // for 9 words).
+  function phaseAScript(utterance, starts, isSpeaking, schedule, onDone) {
+    schedule(() => {
+      if (!isSpeaking()) return;
+      if (utterance.onend) utterance.onend();
+      onDone();
+    }, 6000);
+  }
+
+  // Phase B: real-only. A scripted onboundary for every word, 120ms apart
+  // — comfortably under the shortest observed base delay (~340ms), so the
+  // fallback timer scheduled after each real event never survives long
+  // enough to fire before the next real event cancels it via
+  // scheduleFallbackAdvance's own clearFallbackAdvance() call.
+  function phaseBScript(utterance, starts, isSpeaking, schedule, onDone) {
+    for (let i = 1; i < TEST_WORDS.length; i++) {
+      schedule(() => {
+        if (isSpeaking() && utterance.onboundary) {
+          utterance.onboundary({ name: 'word', charIndex: starts[i] });
+        }
+      }, i * 120);
+    }
+    schedule(() => {
+      if (!isSpeaking()) return;
+      if (utterance.onend) utterance.onend();
+      onDone();
+    }, TEST_WORDS.length * 120 + 300);
+  }
+
+  const phaseAFailures = [];
+  const phaseBFailures = [];
+
+  runPhase('A', phaseAScript, () => {
+    const log = window.__clockWriteLog.slice();
+    for (let i = 1; i < TEST_WORDS.length; i++) {
+      const grounded = log.find(e => e.source === 'grounded' && e.idx === i);
+      const fallback = log.find(e => e.source === 'fallback' && e.idx === i);
+      if (grounded) phaseAFailures.push(`FAIL (the actual bug this test exists to catch): Word #${i + 1} "${TEST_WORDS[i]}" moved via fallback only, but the clock got GROUNDED-written anyway.`);
+      if (!fallback) phaseAFailures.push(`Word #${i + 1} "${TEST_WORDS[i]}" never advanced via fallback within the 6s window — check timing, not decoupling.`);
+    }
+
+    resultsBox.textContent = 'Running clock-decouple self-test (phase B: real-events-only)...';
+    runPhase('B', phaseBScript, () => {
+      const log2 = window.__clockWriteLog.slice();
+      for (let i = 1; i < TEST_WORDS.length; i++) {
+        const grounded = log2.find(e => e.source === 'grounded' && e.idx === i);
+        const fallback = log2.find(e => e.source === 'fallback' && e.idx === i);
+        if (!grounded) phaseBFailures.push(`Word #${i + 1} "${TEST_WORDS[i]}" got a scripted real event but was never grounded-written.`);
+        if (fallback) phaseBFailures.push(`Word #${i + 1} "${TEST_WORDS[i]}" unexpectedly ALSO got a fallback clock-write despite a real event arriving first.`);
+      }
+      finishSelfTest();
+    });
+  });
+
+  function finishSelfTest() {
+    CLOCK_SELFTEST_ACTIVE = false;
+    const allFailures = [...phaseAFailures, ...phaseBFailures];
+    const pass = allFailures.length === 0;
+    const summary = pass
+      ? `PASS — Phase A: all ${TEST_WORDS.length - 1} words advanced via fallback alone and NONE wrote the grounded clock. Phase B: all ${TEST_WORDS.length - 1} words arrived via a real event and every one wrote the grounded clock, with zero fallback writes. The decoupling fix is working as intended.`
+      : `FAIL — ${allFailures.length} problem(s) found:\n` + allFailures.map(f => '  • ' + f).join('\n');
+
+    console.log('[clock-decouple self-test] ' + summary);
+    resultsBox.textContent = 'Entry 58 clock-decouple self-test\n\n' + summary + '\n\n(Full log in console. This box is safe to dismiss — reload clears it.)';
+
+    // Restore real state. Must go back through setCurrentText (not a raw
+    // variable reassignment) — buildWordSpans() replaces readingTextEl's
+    // DOM contents, so a stale wordSpans reference would leave the pane
+    // visibly showing the test sentence while pointing at detached spans.
+    ttsEngine.synth = savedSynth;
+    ttsEngine.UtteranceCtor = savedCtor;
+    fallbackRateFactor = savedFallbackRateFactor;
+    if (fallbackRateFactorValueEl) fallbackRateFactorValueEl.textContent = fallbackRateFactor.toFixed(3);
+    setIsSpeakingChunk(false);
+    setReadingActive(false);
+    clearFallbackAdvance();
+    if (typeof savedText === 'string' && savedText.length > 0) {
+      setCurrentText(savedText, 'restored (self-test cleanup)', { persist: false });
+    } else {
+      currentText = null;
+      wordSpans = [];
+      readingTextEl.innerHTML = '';
+      activeWordIndex = -1;
+      updateStartButtonState();
+    }
+  }
+}
+window.runClockDecoupleSelfTest = runClockDecoupleSelfTest;
