@@ -661,7 +661,16 @@ function runSilentFallbackProbe(rate) {
   if (fallbackProbeInProgress || CLOCK_SELFTEST_ACTIVE) return;
   if (!('speechSynthesis' in window)) return;
 
-  const words = SAMPLE_SENTENCE.match(/\S+/g) || [];
+  // Entry 58's real 44-word device test measured ~0.59-0.60. This probe
+  // originally timed just SAMPLE_SENTENCE (~8 words) and came back at 0.699
+  // on real-device retest — noticeably less corrective. Likely cause: any
+  // fixed startup latency between speak() and audio actually starting gets
+  // averaged over only ~8 words here vs. Entry 58's 44, inflating the
+  // measured ratio. Repeating the sentence to reach a comparable word count
+  // dilutes that fixed cost the same way the longer real test did, instead
+  // of guessing at a correction offset.
+  const probeText = `${SAMPLE_SENTENCE} ${SAMPLE_SENTENCE} ${SAMPLE_SENTENCE} ${SAMPLE_SENTENCE} ${SAMPLE_SENTENCE}`;
+  const words = probeText.match(/\S+/g) || [];
   if (words.length === 0) return;
   const predictedMs = words.reduce((sum, w) => sum + estimateWordDuration(w), 0);
   if (predictedMs <= 0) return;
@@ -702,7 +711,7 @@ function runSilentFallbackProbe(rate) {
   };
 
   try {
-    const utterance = new SpeechSynthesisUtterance(SAMPLE_SENTENCE);
+    const utterance = new SpeechSynthesisUtterance(probeText);
     utterance.rate = rate;
     utterance.volume = 0; // muted — this must never be audible, it wasn't asked for
     const voice = resolveSelectedVoice(window.speechSynthesis);
